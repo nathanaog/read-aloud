@@ -4,7 +4,7 @@
    2. Speed: adds the two headers that make the page "cross-origin isolated", which lets
       the neural voice use several processor cores. GitHub Pages can't set headers itself.
    Your books are never here — they live in the app's IndexedDB on your device. */
-const CACHE = 'read-aloud-v64a1a7b7b0';
+const CACHE = 'read-aloud-v5ea8c320cf';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable.png'];
 
 self.addEventListener('install', e => {

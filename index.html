@@ -145,12 +145,17 @@ h2.section{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:va
 #player.show{display:block}
 .prog-row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);padding:0 6px 4px}
 .prog-row .bar{flex:1;margin:0}
-.ctl-row{display:flex;align-items:center;justify-content:space-between}
+.ctl-row{display:flex;align-items:center;justify-content:space-between;gap:2px}
 .ctl-row .mid{display:flex;align-items:center;gap:6px}
 #playBtn{width:60px;height:60px;border-radius:50%;border:0;background:var(--accent);color:var(--accent-ink);
   display:grid;place-items:center;box-shadow:0 2px 8px rgba(0,0,0,.15)}
 #playBtn svg{width:30px;height:30px}
 .rate-chip{min-width:56px;height:40px;border-radius:20px;border:1px solid var(--line);background:none;font-size:14px;font-weight:600}
+
+.speed-presets{display:grid;grid-template-columns:44px repeat(5,1fr) 44px;gap:4px;align-items:center}
+.speed-presets button{min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--surface);font-weight:600;font-size:15px;font-variant-numeric:tabular-nums;padding:0}
+.speed-presets button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.speed-presets .step{font-size:20px;font-weight:500}
 
 /* ---------- Sheets (chapters drawer etc.) ---------- */
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .25s;z-index:20}
@@ -319,7 +324,8 @@ details .body li{margin:.25em 0}
           </div>
           <div class="field">
             <label class="lbl" for="rateIn">Speed <output id="rateOut">1.00×</output></label>
-            <input type="range" id="rateIn" min="0.5" max="3" step="0.05">
+            <div class="speed-presets" data-presets></div>
+            <input type="range" id="rateIn" min="0.5" max="3" step="0.1">
           </div>
           <div class="field">
             <label class="lbl" for="pitchIn">Pitch <output id="pitchOut">1.00</output></label>
@@ -372,12 +378,12 @@ details .body li{margin:.25em 0}
   <div id="player">
     <div class="prog-row"><span id="progPct">0%</span><div class="bar"><i id="progBar" style="width:0"></i></div><span id="progCh"></span></div>
     <div class="ctl-row">
+      <!-- [prev chapter] [prev sentence] [PLAY] [next sentence] [next chapter] [speed] -->
       <button class="icon-btn" id="prevChBtn" aria-label="Previous chapter"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
-      <div class="mid">
-        <button class="icon-btn" id="prevBtn" aria-label="Previous sentence"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 18l-6-6 6-6M19 18l-6-6 6-6"/></svg></button>
-        <button id="playBtn" aria-label="Play"></button>
-        <button class="icon-btn" id="nextBtn" aria-label="Next sentence"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 6l6 6-6 6M5 6l6 6-6 6"/></svg></button>
-      </div>
+      <button class="icon-btn" id="prevBtn" aria-label="Previous sentence"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 18l-6-6 6-6M19 18l-6-6 6-6"/></svg></button>
+      <button id="playBtn" aria-label="Play"></button>
+      <button class="icon-btn" id="nextBtn" aria-label="Next sentence"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 6l6 6-6 6M5 6l6 6-6 6"/></svg></button>
+      <button class="icon-btn" id="nextChBtn" aria-label="Next chapter"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
       <button class="rate-chip" id="rateChip" aria-label="Playback speed">1.0×</button>
     </div>
   </div>
@@ -402,7 +408,9 @@ details .body li{margin:.25em 0}
   <div class="grab"></div>
   <header><span>Speed &amp; pitch</span><button class="icon-btn" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
   <div class="list" style="padding:0 18px 18px">
-    <div class="field"><label class="lbl" for="rateIn2">Speed <output id="rateOut2"></output></label><input type="range" id="rateIn2" min="0.5" max="3" step="0.05"></div>
+    <div class="field"><label class="lbl" for="rateIn2">Speed <output id="rateOut2"></output></label>
+      <div class="speed-presets" data-presets></div>
+      <input type="range" id="rateIn2" min="0.5" max="3" step="0.1"></div>
     <div class="field"><label class="lbl" for="pitchIn2">Pitch <output id="pitchOut2"></output></label><input type="range" id="pitchIn2" min="0.5" max="2" step="0.05"></div>
   </div>
 </div>
@@ -831,6 +839,7 @@ function renderChapter() {
   $('#readerText').innerHTML = html;
   $('#readerEmpty').hidden = true;
   $('#topTitle').textContent = chap.title;
+  Media.meta();
   highlight(true);
 }
 
@@ -903,6 +912,7 @@ const Player = {
     if (!synth) { toast('Speech isn’t available in this browser. Try Chrome or Edge.'); return; }
     if (!R.book) return;
     if (Neural.active) Neural.audio(); // unlock Web Audio inside the tap
+    Media.start();                     // lock-screen / headphone controls
     this.playing = true; this.errors = 0; Neural.stalls = 0; setPlayIcon();
     this.speakCurrent();
   },
@@ -915,6 +925,7 @@ const Player = {
     clearTimeout(this.watchdog); clearInterval(this.nudge);
     if (synth && (synth.speaking || synth.pending)) synth.cancel();
     this.stopSource(); setBuffering(false);
+    if (was) Media.stop();
     if (was || !silent) setPlayIcon();
   },
   stopSource() { if (this.src) { this.src.onended = null; try { this.src.stop(); } catch {} this.src = null; } },
@@ -924,7 +935,8 @@ const Player = {
   },
 
   speakCurrent() {
-    if (!this.playing) { this.playing = true; setPlayIcon(); }
+    if (!this.playing) { this.playing = true; setPlayIcon(); Media.start(); }
+    this.lastStart = Date.now();
     const g = ++this.gen;
     clearTimeout(this.watchdog); clearInterval(this.nudge);
     this.stopSource();
@@ -1022,6 +1034,72 @@ const Player = {
 };
 
 function setBuffering(on) { $('#playBtn').classList.toggle('buffering', !!on); }
+
+/* =========================================================
+   Lock screen + headphone controls (Media Session API)
+   Chrome only shows media controls while an <audio> element is playing,
+   so a near-silent loop plays during reading. It also keeps Chrome from
+   suspending the page as eagerly when the screen is off (best effort).
+   Headphone buttons arrive as the same media actions:
+     play/pause = play/pause · next/previous track = next/previous sentence
+   If the audio is interrupted by the system (headphones unplugged, a call),
+   reading pauses too.
+   ========================================================= */
+const Media = {
+  el: null, expectPause: 0, supported: 'mediaSession' in navigator,
+
+  /** 10 s of 8 kHz audio at ±1/32768 — inaudible, but counts as real media for Chrome */
+  silentUrl() {
+    const sr = 8000, n = sr * 10, buf = new DataView(new ArrayBuffer(44 + n * 2));
+    const w = (o, str) => [...str].forEach((c, i) => buf.setUint8(o + i, c.charCodeAt(0)));
+    w(0, 'RIFF'); buf.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); buf.setUint32(16, 16, true);
+    buf.setUint16(20, 1, true); buf.setUint16(22, 1, true); buf.setUint32(24, sr, true); buf.setUint32(28, sr * 2, true);
+    buf.setUint16(32, 2, true); buf.setUint16(34, 16, true); w(36, 'data'); buf.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) buf.setInt16(44 + i * 2, (i & 1) ? 1 : -1, true);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  },
+
+  init() {
+    this.el = new Audio(this.silentUrl());
+    this.el.loop = true; this.el.preload = 'auto'; this.el.setAttribute('playsinline', '');
+    // A pause we didn't ask for = the system interrupted us (headphones unplugged, phone call…)
+    this.el.addEventListener('pause', () => {
+      if (this.expectPause > 0) { this.expectPause--; return; }
+      if (Player.playing) { Player.pause(); toast('Paused'); }
+    });
+    if (!this.supported) return;
+    const ms = navigator.mediaSession, on = (a, fn) => { try { ms.setActionHandler(a, fn); } catch {} };
+    on('play', () => { if (R.book && !Player.playing) Player.play(); });
+    on('pause', () => { if (Player.playing) Player.pause(); });
+    on('stop', () => { if (Player.playing) Player.pause(); });
+    on('previoustrack', () => R.book && step(-1));
+    on('nexttrack', () => R.book && step(+1));
+    on('seekbackward', null); on('seekforward', null); on('seekto', null); // no scrubber: sentences, not a timeline
+  },
+
+  start() {
+    if (!this.el) return;
+    if (this.el.paused) this.el.play().catch(() => {}); // must happen inside the play tap the first time
+    if (this.supported) navigator.mediaSession.playbackState = 'playing';
+    this.meta();
+  },
+  stop() {
+    if (!this.el) return;
+    if (!this.el.paused) { this.expectPause++; this.el.pause(); }
+    if (this.supported) navigator.mediaSession.playbackState = R.book ? 'paused' : 'none';
+  },
+  /** What the lock screen shows: chapter, book, author */
+  meta() {
+    if (!this.supported || !R.book || typeof MediaMetadata === 'undefined') return;
+    const ch = R.content.chapters[R.ch];
+    const t = `${R.book.title}|${ch.title}`;
+    if (this._t === t) return; this._t = t;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: ch.title, artist: R.book.title + (R.book.author ? ' · ' + R.book.author : ''), album: 'Read Aloud',
+      artwork: [192, 512].map(n => ({ src: new URL(`icon-${n}.png`, location.href).href, sizes: `${n}x${n}`, type: 'image/png' })),
+    });
+  },
+};
 
 function setPlayIcon() {
   const b = $('#playBtn');
@@ -1459,12 +1537,26 @@ function applyAppearance() {
   $('#lhIn').value = S.lh; $('#lhOut').textContent = (+S.lh).toFixed(2);
   $('#padIn').value = S.pad; $('#padOut').textContent = S.pad + 'px';
 }
+const SPEED_PRESETS = [0.75, 1, 1.25, 1.5, 2];
+/** Speed buttons: −0.1 · 0.75× 1× 1.25× 1.5× 2× · +0.1 (the slider below moves in 0.1 steps) */
+function renderSpeedPresets() {
+  $$('[data-presets]').forEach(box => {
+    box.innerHTML = `<button class="step" data-rate-step="-0.1" aria-label="Slower">−</button>` +
+      SPEED_PRESETS.map(v => `<button data-rate="${v}">${v}×</button>`).join('') +
+      `<button class="step" data-rate-step="0.1" aria-label="Faster">+</button>`;
+  });
+  syncRateUI();
+}
+function setRate(v) {
+  S.rate = Math.round(clamp(v, 0.5, 3) * 100) / 100; saveSettings(); syncRateUI(); liveRestart();
+}
 function syncRateUI() {
+  $$('[data-rate]').forEach(b => b.setAttribute('aria-pressed', Math.abs(+b.dataset.rate - S.rate) < 0.001));
   for (const sfx of ['', '2']) {
     $('#rateIn' + sfx).value = S.rate; $('#rateOut' + sfx).textContent = (+S.rate).toFixed(2) + '×';
     $('#pitchIn' + sfx).value = S.pitch; $('#pitchOut' + sfx).textContent = (+S.pitch).toFixed(2);
   }
-  $('#rateChip').textContent = (+S.rate).toFixed(S.rate % 0.5 ? 2 : 1) + '×';
+  $('#rateChip').textContent = String(+(+S.rate).toFixed(2)) + '×';
 }
 // Live effect: changing speed/pitch restarts the current sentence with the new values (debounced)
 let liveTimer;
@@ -1472,9 +1564,15 @@ function liveRestart() { clearTimeout(liveTimer); liveTimer = setTimeout(() => P
 
 function bindSettings() {
   for (const sfx of ['', '2']) {
-    $('#rateIn' + sfx).addEventListener('input', e => { S.rate = +e.target.value; syncRateUI(); saveSettings(); liveRestart(); });
+    $('#rateIn' + sfx).addEventListener('input', e => setRate(+e.target.value));
     $('#pitchIn' + sfx).addEventListener('input', e => { S.pitch = +e.target.value; syncRateUI(); saveSettings(); liveRestart(); });
   }
+  renderSpeedPresets();
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-rate],[data-rate-step]'); if (!b) return;
+    if (b.dataset.rate) setRate(+b.dataset.rate);
+    else setRate(Math.round((S.rate + +b.dataset.rateStep) * 10) / 10);
+  });
   $('#themeSeg').addEventListener('click', e => { const v = e.target.closest('button')?.dataset.v; if (v) { S.theme = v; saveSettings(); applyAppearance(); } });
   $('#fontSeg').addEventListener('click', e => { const v = e.target.closest('button')?.dataset.v; if (v) { S.font = v; saveSettings(); applyAppearance(); } });
   [['sizeIn', 'size'], ['lhIn', 'lh'], ['padIn', 'pad']].forEach(([id, k]) =>
@@ -1641,7 +1739,9 @@ const HELP = [
    <p>Speed (0.5–3×) changes the current sentence immediately. Pitch only works with system voices.</p>`],
   ['Add to your home screen', `<p>Open the app from its web address, then tap <b>Install</b> at the top (or Chrome’s ⋮ menu › <b>Install app</b>). It then opens full-screen like a normal app and works offline.</p>
    <p>Always open it from the web address or the home-screen icon, not from a downloaded file — a downloaded file can’t keep your library or reading position.</p>`],
-  ['Keep reading with the screen off', `<p><span class="soon">Stage 3</span> Chrome on Android may stop speech when the screen locks or you switch apps. The app will try to stay alive (silent audio + lock-screen controls) and will resume from the current sentence when you return. Tip: Android Settings › Apps › Chrome › Battery › <b>Unrestricted</b> helps a lot. On Samsung, also add Chrome under Settings › Battery › Background usage limits › <b>Never sleeping apps</b>.</p>`],
+  ['Lock screen and headphones', `<p>While it’s reading, play/pause and next/previous sentence appear on the lock screen and in the notification shade, with the book and chapter. Headphone buttons work too: <b>press once</b> to play/pause, <b>twice</b> for the next sentence, <b>three times</b> for the previous one (exact presses depend on your headphones). Unplugging or disconnecting headphones pauses reading.</p>`],
+  ['Keep reading with the screen off', `<p>Chrome on Android may still stop speech when the screen locks or you switch apps — this is best effort. If it stops, it continues from the current sentence when you come back. Tip: Android Settings › Apps › Chrome › Battery › <b>Unrestricted</b> helps a lot. On Samsung, also add Chrome under Settings › Battery › Background usage limits › <b>Never sleeping apps</b>.</p>`],
+  ['Speed and chapters', `<p>Tap the speed button (e.g. <b>1×</b>) on the player for quick picks — 0.75×, 1×, 1.25×, 1.5×, 2× — or − / + to change by 0.1. The ⏮ / ⏭ buttons jump to the previous / next chapter (⏮ first goes back to the start of the current chapter); ≪ / ≫ move one sentence.</p>`],
   ['Sleep timer, bookmarks, pronunciation, skip rules', `<p><span class="soon">Stages 2–3</span> Sleep timer (15–60 min or end of chapter), bookmarks with notes, a find/replace list for names the voice mispronounces, and toggles to skip footnotes, page numbers, headings or bracketed text.</p>`],
   ['Back up and restore', `<p><span class="soon">Stage 2</span> Export settings, bookmarks and pronunciation fixes as a JSON file, and import them on another device.</p>`],
   ['Privacy', `<p>Nothing leaves your device. There’s no account and no server: books, positions and settings live in this browser’s storage. (Voices labelled “Online” are run by your browser’s voice provider, which receives the sentence being spoken — use an Offline voice to avoid that.) Clearing the browser’s site data deletes your library.</p>`],
@@ -1748,6 +1848,10 @@ async function boot() {
   $('#nextBtn').addEventListener('click', () => step(+1));
   $('#prevBtn').addEventListener('click', () => step(-1));
   $('#prevChBtn').addEventListener('click', () => goTo(R.s > 3 ? R.ch : Math.max(0, R.ch - 1), 0)); // restart chapter, or previous if at its start
+  $('#nextChBtn').addEventListener('click', () => {
+    if (R.ch < R.content.chapters.length - 1) goTo(R.ch + 1, 0); else toast('This is the last chapter');
+  });
+  Media.init();
 
   // Tap a sentence → jump there (keeps playing if playing)
   $('#readerText').addEventListener('click', e => { const s = e.target.closest('.s'); if (s) { R.userScrollAt = 0; goTo(R.ch, +s.dataset.i); } });
@@ -1756,7 +1860,13 @@ async function boot() {
 
   // Save on leave
   addEventListener('pagehide', savePosition);
-  document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && savePosition());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { savePosition(); return; }
+    // Back on screen: if Chrome silently stopped the speech while we were away, carry on from this sentence
+    if (Player.playing && Date.now() - (Player.lastStart || 0) > 20000 && !(synth && synth.speaking) && !Player.src && !$('#playBtn').classList.contains('buffering')) {
+      toast('Speech was interrupted — continuing from this sentence'); Player.speakCurrent();
+    }
+  });
 }
 
 async function deleteBook(id) {

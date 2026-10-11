@@ -1,0 +1,6 @@
+{
+  "name": "read-aloud-build",
+  "private": true,
+  "description": "Builds index.html (the whole app in one file) from app.html + inlined libraries. Run: npm install && python3 build.py",
+  "dependencies": { "jszip": "3.10.2", "kokoro-js": "1.2.1" }
+}

@@ -1,0 +1,1871 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#faf9f6">
+<title>Read Aloud</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<!--
+  READ ALOUD — a single-file, offline, read-aloud ebook reader.
+  Stage 1: EPUB import, reader with sentence highlighting, system voices,
+           resume, light/sepia/night themes, Help tab.
+
+  Layout of this file:
+    1. CSS (theme tokens → layout → components)
+    2. HTML (header, four views, player bar, bottom tabs, sheets)
+    3. Inlined libraries (JSZip)
+    4. App script, in sections:
+       Utils · Settings · Storage (IndexedDB) · Text processing ·
+       EPUB import · Library view · Reader view · Speech engine ·
+       Voices · Settings view · Help / welcome · Boot
+  Nothing in this file talks to a server. Books, positions and settings
+  stay in this browser on this device.
+-->
+<style>
+/* ---------- 1. Theme tokens ---------- */
+:root{
+  --bg:#faf9f6; --surface:#ffffff; --surface-2:#f1efea; --line:#e3e0d8;
+  --text:#1f1e1c; --muted:#6c6a64; --accent:#2f6f5e; --accent-ink:#ffffff;
+  --hl:rgba(47,111,94,.17); --danger:#a8382c;
+  --serif: "Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Noto Serif",serif;
+  --sans: system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif;
+  --read-font:var(--serif); --read-size:19px; --read-lh:1.65; --read-pad:20px;
+  --tabbar-h:60px; --player-h:84px;
+  --safe-b:env(safe-area-inset-bottom,0px); --safe-t:env(safe-area-inset-top,0px);
+}
+:root[data-theme="sepia"]{
+  --bg:#f3ead6; --surface:#faf4e4; --surface-2:#ebe0c8; --line:#ddcfb2;
+  --text:#3a2e1f; --muted:#7a6a53; --accent:#8a5a2b; --accent-ink:#fffaf0;
+  --hl:rgba(196,138,58,.30);
+}
+:root[data-theme="dark"]{
+  --bg:#121416; --surface:#1a1d20; --surface-2:#23272b; --line:#2e3338;
+  --text:#e6e3dc; --muted:#9a9890; --accent:#7cc4ad; --accent-ink:#0e1a16;
+  --hl:rgba(124,196,173,.24); --danger:#e7867a;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg); color:var(--text); font-family:var(--sans);
+  -webkit-tap-highlight-color:transparent; overscroll-behavior-y:contain;
+  transition:background-color .35s ease,color .35s ease;
+}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+[hidden]{display:none!important}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+/* ---------- Layout ---------- */
+#app{display:flex;flex-direction:column;height:100%;height:100dvh}
+header.top{
+  flex:none; display:flex; align-items:center; gap:8px;
+  padding:calc(var(--safe-t) + 6px) 12px 6px 16px; min-height:52px;
+  background:var(--bg); border-bottom:1px solid var(--line);
+  transition:background-color .35s ease,border-color .35s ease;
+}
+header.top h1{font-size:17px;font-weight:650;margin:0;flex:1;min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.01em}
+main{flex:1;min-height:0;position:relative}
+.view{position:absolute;inset:0;overflow-y:auto;-webkit-overflow-scrolling:touch;display:none}
+.view.active{display:block}
+.pad{padding:16px 16px 32px;max-width:720px;margin:0 auto}
+
+/* Bottom tabs: one-thumb reachable, ≥44px targets, gesture-nav safe */
+nav.tabs{
+  flex:none; display:grid; grid-template-columns:repeat(4,1fr);
+  padding-bottom:var(--safe-b); background:var(--surface);
+  border-top:1px solid var(--line);
+  transition:background-color .35s ease,border-color .35s ease;
+}
+nav.tabs button{
+  background:none;border:0;min-height:var(--tabbar-h);display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:3px;font-size:12px;color:var(--muted);
+}
+nav.tabs button svg{width:24px;height:24px}
+nav.tabs button[aria-selected="true"]{color:var(--accent);font-weight:600}
+
+/* ---------- Generic components ---------- */
+.icon-btn{width:44px;height:44px;border-radius:12px;border:0;background:none;
+  display:grid;place-items:center;color:var(--text)}
+.icon-btn:active{background:var(--surface-2)}
+.icon-btn svg{width:24px;height:24px}
+.btn{min-height:44px;padding:0 18px;border-radius:12px;border:1px solid var(--line);
+  background:var(--surface);display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:550}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.btn.ghost{background:none}
+.btn.danger{color:var(--danger)}
+.btn:active{transform:scale(.98)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px;
+  transition:background-color .35s ease,border-color .35s ease}
+.muted{color:var(--muted)}
+.small{font-size:13px}
+h2.section{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+  font-weight:600;margin:28px 4px 10px}
+.banner{margin:12px 16px 0;padding:12px 14px;border-radius:12px;background:var(--surface-2);
+  font-size:14px;line-height:1.45}
+.banner[hidden]{display:none}
+
+/* ---------- Library ---------- */
+.import-zone{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;
+  border:1.5px dashed var(--line);border-radius:18px;padding:22px 16px;margin-top:4px}
+.import-zone.drag{border-color:var(--accent);background:var(--hl)}
+.book{display:flex;gap:14px;align-items:center;padding:12px;margin-bottom:10px}
+.cover{flex:none;width:52px;height:72px;border-radius:6px;display:grid;place-items:center;
+  font-family:var(--serif);font-size:24px;color:#fff;box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.book .info{flex:1;min-width:0}
+.book .t{font-weight:620;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.book .a{font-size:13px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar{height:4px;border-radius:2px;background:var(--surface-2);margin-top:8px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:2px}
+.book .acts{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.continue-hero{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.continue-hero .info{flex:1;min-width:0}
+
+/* ---------- Reader ---------- */
+#view-reader{scroll-padding:30vh 0}
+#readerText{font-family:var(--read-font);font-size:var(--read-size);line-height:var(--read-lh);
+  padding:8px var(--read-pad) 40vh;max-width:42em;margin:0 auto;
+  hyphens:auto;-webkit-hyphens:auto;overflow-wrap:break-word}
+#readerText p{margin:0 0 .9em}
+#readerText p.h{font-weight:700;font-size:1.15em;margin:1.4em 0 .7em;line-height:1.35}
+#readerText p.fn{font-size:.85em;color:var(--muted)}
+#readerText .chap-title{font-size:1.5em;font-weight:700;margin:.8em 0 1em;line-height:1.25}
+/* Sentence spans: highlight uses background only → zero layout shift */
+.s{border-radius:3px;transition:background-color .2s ease;-webkit-box-decoration-break:clone;box-decoration-break:clone;cursor:pointer}
+.s.cur{background:var(--hl)}
+.s sup{font-size:.7em;line-height:0;color:var(--muted)}
+.reader-empty{padding:40px 24px;text-align:center}
+
+/* Player bar: bottom-anchored, above the tabs */
+#player{flex:none;display:none;background:var(--surface);border-top:1px solid var(--line);
+  padding:6px 10px 8px;transition:background-color .35s ease,border-color .35s ease}
+#player.show{display:block}
+.prog-row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);padding:0 6px 4px}
+.prog-row .bar{flex:1;margin:0}
+.ctl-row{display:flex;align-items:center;justify-content:space-between;gap:2px}
+.ctl-row .mid{display:flex;align-items:center;gap:6px}
+#playBtn{width:60px;height:60px;border-radius:50%;border:0;background:var(--accent);color:var(--accent-ink);
+  display:grid;place-items:center;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+#playBtn svg{width:30px;height:30px}
+.rate-chip{min-width:56px;height:40px;border-radius:20px;border:1px solid var(--line);background:none;font-size:14px;font-weight:600}
+
+.speed-presets{display:grid;grid-template-columns:44px repeat(5,1fr) 44px;gap:4px;align-items:center}
+.speed-presets button{min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--surface);font-weight:600;font-size:15px;font-variant-numeric:tabular-nums;padding:0}
+.speed-presets button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.speed-presets .step{font-size:20px;font-weight:500}
+
+/* ---------- Sheets (chapters drawer etc.) ---------- */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .25s;z-index:20}
+.scrim.open{opacity:1;pointer-events:auto}
+.sheet{position:fixed;left:0;right:0;bottom:0;max-height:78vh;background:var(--surface);z-index:21;
+  border-radius:18px 18px 0 0;transform:translateY(105%);transition:transform .28s ease;
+  display:flex;flex-direction:column;padding-bottom:var(--safe-b);max-width:720px;margin:0 auto}
+.sheet.open{transform:none}
+.sheet .grab{width:40px;height:4px;border-radius:2px;background:var(--line);margin:8px auto 2px}
+.sheet header{display:flex;align-items:center;padding:4px 8px 8px 18px;font-weight:650}
+.sheet header span{flex:1}
+.sheet .list{overflow-y:auto;padding:0 8px 12px}
+.row-btn{display:flex;width:100%;text-align:left;align-items:center;gap:10px;min-height:48px;padding:8px 12px;
+  border:0;background:none;border-radius:10px}
+.row-btn:active{background:var(--surface-2)}
+.row-btn.cur{background:var(--hl);font-weight:600}
+.row-btn .n{color:var(--muted);font-variant-numeric:tabular-nums;width:2em;flex:none}
+
+/* ---------- Settings ---------- */
+.field{display:flex;flex-direction:column;gap:8px;padding:14px 0;border-bottom:1px solid var(--line)}
+.field:last-child{border-bottom:0}
+.field label.lbl{font-weight:580;display:flex;justify-content:space-between;align-items:baseline}
+.field output{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:650}
+select{min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:0 10px;width:100%}
+input[type=range]{width:100%;height:32px;accent-color:var(--accent)}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:4px;background:var(--surface-2);padding:4px;border-radius:12px}
+.seg button{min-height:40px;border:0;border-radius:9px;background:none;font-weight:550}
+.seg button[aria-pressed="true"]{background:var(--surface);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.tip{font-size:13px;line-height:1.5;background:var(--surface-2);border-radius:10px;padding:10px 12px;color:var(--muted)}
+.voice-meta{font-size:13px;color:var(--muted)}
+.tag{display:inline-block;font-size:11px;font-weight:650;padding:2px 7px;border-radius:6px;background:var(--surface-2);margin-left:6px}
+.tag.off{background:var(--hl);color:var(--accent)}
+
+/* Neural voice panel */
+.engine-panel{display:flex;flex-direction:column;gap:10px}
+.dl-bar{height:8px;border-radius:4px;background:var(--surface-2);overflow:hidden}
+.dl-bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.dl-row{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.choice{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:12px;cursor:pointer}
+.choice input{margin-top:4px;accent-color:var(--accent);width:18px;height:18px}
+.choice b{display:block}
+.calc{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums;background:var(--surface-2);border-radius:10px;padding:10px 12px}
+.calc .ok{color:var(--accent);font-weight:650}.calc .bad{color:var(--danger);font-weight:650}
+#playBtn.buffering{position:relative}
+#playBtn.buffering::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:3px solid transparent;border-top-color:var(--accent);animation:spin .9s linear infinite}
+
+/* ---------- Help ---------- */
+details{background:var(--surface);border:1px solid var(--line);border-radius:14px;margin-bottom:8px;
+  transition:background-color .35s ease,border-color .35s ease}
+summary{min-height:52px;display:flex;align-items:center;padding:0 16px;font-weight:600;list-style:none;cursor:pointer}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"";margin-left:auto;width:9px;height:9px;border-right:2px solid var(--muted);
+  border-bottom:2px solid var(--muted);transform:rotate(45deg);transition:transform .2s}
+details[open] summary::after{transform:rotate(-135deg)}
+details .body{padding:0 16px 14px;line-height:1.55;font-size:15px}
+details .body ol,details .body ul{padding-left:1.2em;margin:.4em 0}
+details .body li{margin:.25em 0}
+.soon{font-size:11px;font-weight:650;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:8px}
+
+/* ---------- Overlays ---------- */
+#toast{position:fixed;left:50%;bottom:calc(var(--tabbar-h) + var(--player-h) + var(--safe-b) + 12px);
+  transform:translateX(-50%) translateY(10px);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;
+  font-size:14px;max-width:calc(100% - 32px);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:40;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%)}
+#busy{position:fixed;inset:0;display:none;place-items:center;background:rgba(0,0,0,.35);z-index:50}
+#busy.show{display:grid}
+#busy .card{min-width:240px;text-align:center}
+.spinner{width:28px;height:28px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);
+  margin:4px auto 10px;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <h1 id="topTitle">Library</h1>
+    <button class="icon-btn" id="chaptersBtn" aria-label="Chapters" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    </button>
+    <button class="btn primary small" id="installBtn" hidden style="min-height:36px;padding:0 12px">Install</button>
+    <button class="icon-btn" id="themeBtn" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg>
+    </button>
+  </header>
+
+  <div class="banner" id="envBanner" hidden></div>
+
+  <main>
+    <!-- LIBRARY -->
+    <section class="view active" id="view-library" aria-label="Library">
+      <div class="pad">
+        <div class="card" id="welcome" hidden style="margin-bottom:14px">
+          <div style="font-weight:650;font-size:17px;margin-bottom:6px">Welcome to Read Aloud</div>
+          <div class="muted" style="line-height:1.5">Import an EPUB and tap play — it reads to you, highlights each sentence and remembers where you stopped. New here? The <b>Help</b> tab has a two‑minute guide, including how to get better voices on Android.</div>
+          <div style="display:flex;gap:8px;margin-top:12px">
+            <button class="btn primary" data-goto="help">Open Help</button>
+            <button class="btn ghost" id="welcomeDismiss">Got it</button>
+          </div>
+        </div>
+
+        <div id="continueBox"></div>
+
+        <label class="import-zone" id="importZone">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" style="color:var(--accent)"><path d="M12 15V4M7 9l5-5 5 5M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg>
+          <span class="btn primary" role="button">Import a book</span>
+          <span class="muted small">EPUB · PDF text extraction arrives in Stage 2</span>
+          <input type="file" id="fileInput" accept=".epub,.pdf,application/epub+zip,application/pdf" class="sr">
+        </label>
+
+        <h2 class="section" id="libHeading" hidden>Your books</h2>
+        <div id="bookList"></div>
+        <p class="muted small" style="text-align:center;margin-top:28px">Private by design: books and settings never leave this device.</p>
+      </div>
+    </section>
+
+    <!-- READER -->
+    <section class="view" id="view-reader" aria-label="Reader">
+      <div class="reader-empty" id="readerEmpty">
+        <p class="muted">No book open.</p>
+        <button class="btn primary" data-goto="library">Go to library</button>
+      </div>
+      <article id="readerText" lang="en"></article>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="view" id="view-settings" aria-label="Settings">
+      <div class="pad">
+        <h2 class="section" style="margin-top:8px">Voice</h2>
+        <div class="card">
+          <div class="field">
+            <span class="lbl">Voice engine</span>
+            <div class="seg" id="engineSeg"><button data-v="system">System voices</button><button data-v="neural">Neural (beta)</button></div>
+            <div class="voice-meta" id="engineNote"></div>
+          </div>
+
+          <!-- Neural voice: setup / download / voice choice / speed test -->
+          <div class="field engine-panel" id="neuralBox" hidden>
+            <div id="neuralSetup">
+              <p style="margin:0 0 10px;line-height:1.5">A natural‑sounding AI voice (Kokoro) that runs <b>entirely on your phone</b>. It needs a one‑time download, then works offline. Nothing you read is sent anywhere.</p>
+              <label class="choice"><input type="radio" name="kvariant" value="full"><span><b>Best — <span id="sizeFull"></span></b> <span class="tag off">Recommended</span><span class="small muted" style="display:block">Full model. Fastest: the speed test tries your phone’s graphics chip and processor and uses whichever is quicker.</span></span></label>
+              <label class="choice" style="margin-top:8px"><input type="radio" name="kvariant" value="cpu"><span><b>Smaller — <span id="sizeCpu"></span></b><span class="small muted" style="display:block">Compressed model, same voices. About a third of the space, but slower to generate speech.</span></span></label>
+              <div class="small muted" style="margin-top:8px" id="spaceNote"></div>
+              <div style="display:flex;gap:8px;margin-top:10px"><button class="btn primary" id="dlBtn">Download voice</button><button class="btn ghost" id="dlCancel" hidden>Cancel</button></div>
+              <div id="dlProg" hidden style="margin-top:10px"><div class="dl-bar"><i id="dlBarFill"></i></div><div class="dl-row" style="margin-top:6px"><span id="dlText"></span><span id="dlPct"></span></div></div>
+            </div>
+            <div id="neuralReady" hidden>
+              <label class="lbl" for="kvoiceSel">Neural voice</label>
+              <select id="kvoiceSel"></select>
+              <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="kPreviewBtn">▶ Preview</button><button class="btn ghost" id="kBenchBtn">Run speed test</button></div>
+              <div class="calc" id="benchOut">Speed test not run yet.</div>
+              <div class="small muted" id="neuralStatus"></div>
+              <button class="btn ghost danger small" id="kDeleteBtn" style="align-self:flex-start">Delete download</button>
+            </div>
+          </div>
+
+          <div class="field" id="sysVoiceBox">
+            <label class="lbl" for="voiceSel">Voice <span class="voice-meta" id="voiceCount"></span></label>
+            <select id="voiceSel"></select>
+            <div class="voice-meta" id="voiceInfo"></div>
+            <div style="display:flex;gap:8px">
+              <button class="btn" id="previewBtn">▶ Preview</button>
+              <button class="btn ghost" id="voiceAutoBtn">Auto‑pick best</button>
+            </div>
+            <div class="tip"><b>For better voices</b>, go to Android Settings › System › Languages › Text‑to‑speech output (Google) › Install voice data › <b>English (United States)</b> or <b>English (United Kingdom)</b>, and download a high‑quality voice. Then reopen this app.<br><br><b>Samsung Galaxy:</b> Settings › General management › Text‑to‑speech › set <i>Preferred engine</i> to <b>Speech Services by Google</b>, then tap ⚙ › Install voice data › English, and download the voice you like. Samsung’s own engine also works but offers fewer voices to Chrome.</div>
+          </div>
+          <div class="field">
+            <label class="lbl" for="rateIn">Speed <output id="rateOut">1.00×</output></label>
+            <div class="speed-presets" data-presets></div>
+            <input type="range" id="rateIn" min="0.5" max="3" step="0.1">
+          </div>
+          <div class="field">
+            <label class="lbl" for="pitchIn">Pitch <output id="pitchOut">1.00</output></label>
+            <input type="range" id="pitchIn" min="0.5" max="2" step="0.05">
+            <div class="voice-meta" id="pitchNote" hidden>Pitch only applies to system voices.</div>
+          </div>
+        </div>
+
+        <h2 class="section">Appearance</h2>
+        <div class="card">
+          <div class="field">
+            <span class="lbl">Theme</span>
+            <div class="seg" id="themeSeg">
+              <button data-v="light">Light</button><button data-v="sepia">Sepia</button><button data-v="dark">Night</button>
+            </div>
+          </div>
+          <div class="field">
+            <span class="lbl">Font</span>
+            <div class="seg" id="fontSeg"><button data-v="serif" style="font-family:var(--serif)">Serif</button><button data-v="sans" style="font-family:var(--sans)">Sans</button></div>
+          </div>
+          <div class="field">
+            <label class="lbl" for="sizeIn">Text size <output id="sizeOut"></output></label>
+            <input type="range" id="sizeIn" min="14" max="32" step="1">
+          </div>
+          <div class="field">
+            <label class="lbl" for="lhIn">Line spacing <output id="lhOut"></output></label>
+            <input type="range" id="lhIn" min="1.2" max="2.2" step="0.05">
+          </div>
+          <div class="field">
+            <label class="lbl" for="padIn">Margins <output id="padOut"></output></label>
+            <input type="range" id="padIn" min="8" max="64" step="2">
+          </div>
+        </div>
+
+        <h2 class="section">About &amp; privacy</h2>
+        <div class="card small muted" style="line-height:1.55">
+          Read Aloud runs entirely in your browser. Books, reading positions and settings are stored on this device only (IndexedDB) and are never uploaded. System voices marked “Online” are provided by your browser and may send the sentence being spoken to that voice provider — pick an “Offline” voice to avoid that.
+          <div style="margin-top:8px">Build: Stage 1 + neural voices + hosting. Neural voice: Kokoro‑82M (Apache‑2.0) via kokoro‑js and Transformers.js; model files are downloaded once from Hugging Face and the runtime from jsDelivr, then kept on this device.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HELP -->
+    <section class="view" id="view-help" aria-label="Help">
+      <div class="pad" id="helpBody"><!-- filled from HELP below --></div>
+    </section>
+  </main>
+
+  <!-- PLAYER (visible on the Reader tab) -->
+  <div id="player">
+    <div class="prog-row"><span id="progPct">0%</span><div class="bar"><i id="progBar" style="width:0"></i></div><span id="progCh"></span></div>
+    <div class="ctl-row">
+      <!-- [prev chapter] [prev sentence] [PLAY] [next sentence] [next chapter] [speed] -->
+      <button class="icon-btn" id="prevChBtn" aria-label="Previous chapter"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+      <button class="icon-btn" id="prevBtn" aria-label="Previous sentence"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 18l-6-6 6-6M19 18l-6-6 6-6"/></svg></button>
+      <button id="playBtn" aria-label="Play"></button>
+      <button class="icon-btn" id="nextBtn" aria-label="Next sentence"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 6l6 6-6 6M5 6l6 6-6 6"/></svg></button>
+      <button class="icon-btn" id="nextChBtn" aria-label="Next chapter"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+      <button class="rate-chip" id="rateChip" aria-label="Playback speed">1.0×</button>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="library" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a1 1 0 0 1 1-1h3v16H5a1 1 0 0 1-1-1zM8 4h4v16H8M14.5 5.2l3.4-.9 3 14-3.4.9z"/></svg>Library</button>
+    <button role="tab" data-tab="reader"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6c-2-1.5-5-2-8-2v14c3 0 6 .5 8 2 2-1.5 5-2 8-2V4c-3 0-6 .5-8 2zM12 6v14"/></svg>Reader</button>
+    <button role="tab" data-tab="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Settings</button>
+    <button role="tab" data-tab="help"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17.2v.1"/></svg>Help</button>
+  </nav>
+</div>
+
+<!-- Chapters bottom sheet -->
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="chapSheet" role="dialog" aria-label="Chapters">
+  <div class="grab"></div>
+  <header><span>Chapters</span><button class="icon-btn" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+  <div class="list" id="chapList"></div>
+</div>
+<!-- Speed quick sheet -->
+<div class="sheet" id="rateSheet" role="dialog" aria-label="Speed">
+  <div class="grab"></div>
+  <header><span>Speed &amp; pitch</span><button class="icon-btn" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+  <div class="list" style="padding:0 18px 18px">
+    <div class="field"><label class="lbl" for="rateIn2">Speed <output id="rateOut2"></output></label>
+      <div class="speed-presets" data-presets></div>
+      <input type="range" id="rateIn2" min="0.5" max="3" step="0.1"></div>
+    <div class="field"><label class="lbl" for="pitchIn2">Pitch <output id="pitchOut2"></output></label><input type="range" id="pitchIn2" min="0.5" max="2" step="0.05"></div>
+  </div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="busy"><div class="card"><div class="spinner"></div><div id="busyMsg">Working…</div></div></div>
+
+<!-- ===================== 3. Inlined libraries ===================== -->
+<script>/* JSZip v3 — MIT/GPLv3 dual license, (c) Stuart Knightley et al. */
+/*__JSZIP__*/</script>
+
+<!-- kokoro-js 1.2.1 (Apache-2.0) bundle incl. Transformers.js 3.5.1 + phonemizer (ES module; build adds
+     the export "tfEnv"). Stored as inert text; only loaded inside a Web Worker when the neural voice is on. -->
+<script type="text/plain" id="kokoroLib">/*__KOKORO__*/</script>
+
+<!-- ===================== 4. App ===================== -->
+<script>
+'use strict';
+
+/* =========================================================
+   Utils
+   ========================================================= */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const isAndroid = /Android/i.test(navigator.userAgent);
+// Footnote-reference markers embedded in stored sentence text:  ref .
+// Rendered as <sup>, removed before speaking.
+const NOTE_RE = /([^]*)/g;
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+
+let toastTimer;
+function toast(msg, ms = 2800) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+function busy(msg) { $('#busyMsg').textContent = msg || ''; $('#busy').classList.toggle('show', !!msg); }
+function banner(html) { const b = $('#envBanner'); b.innerHTML = html; b.hidden = !html; }
+
+/* =========================================================
+   Settings (small, so localStorage is fine; books go to IndexedDB)
+   ========================================================= */
+const DEFAULTS = {
+  theme: null,            // null = follow system on first run, then persisted
+  font: 'serif', size: 19, lh: 1.65, pad: 20,
+  voiceURI: null, rate: 1, pitch: 1,
+  engine: 'system',       // 'system' | 'neural' (neural is off by default)
+  kvoice: 'af_heart', kvariant: 'full', neuralInstalled: null, // installed variant ('full' | 'cpu') or null
+  neuralDevice: null,     // 'webgpu' | 'wasm' — chosen by the speed test
+  lastBookId: null,
+};
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const S = Object.assign({}, DEFAULTS, LS.get('ra.settings', {}));
+if (S.neuralInstalled === 'gpu') S.neuralInstalled = 'full'; // renamed option
+if (S.kvariant === 'gpu') S.kvariant = 'full';
+function saveSettings() { LS.set('ra.settings', S); }
+
+/* =========================================================
+   Storage — IndexedDB
+   stores: books (metadata, small) · content (chapters, large) · progress
+   Falls back to in-memory maps if IndexedDB is blocked (some file:// or
+   private-mode setups), with a visible warning.
+   ========================================================= */
+const DB = (() => {
+  let db = null, mem = null;
+  const STORES = ['books', 'content', 'progress', 'assets']; // assets: neural model files (by URL)
+  function open() {
+    return new Promise(res => {
+      let req;
+      try { req = indexedDB.open('readaloud', 2); } catch { return res(false); }
+      req.onupgradeneeded = () => STORES.forEach(n => req.result.objectStoreNames.contains(n) || req.result.createObjectStore(n, { keyPath: 'id' }));
+      req.onsuccess = () => { db = req.result; res(true); };
+      req.onerror = req.onblocked = () => res(false);
+      setTimeout(() => res(!!db), 4000); // some browsers never fire either event
+    });
+  }
+  function tx(store, mode, fn) {
+    if (!db) return Promise.resolve(fn(null));
+    return new Promise((res, rej) => {
+      const t = db.transaction(store, mode), st = t.objectStore(store); let out;
+      const r = fn(st); if (r) r.onsuccess = () => { out = r.result; };
+      t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+    });
+  }
+  return {
+    async init() {
+      const ok = await open();
+      if (!ok) { mem = Object.fromEntries(STORES.map(n => [n, new Map()])); }
+      return ok;
+    },
+    get persistent() { return !!db; },
+    get: (s, id) => mem ? Promise.resolve(mem[s].get(id)) : tx(s, 'readonly', st => st.get(id)),
+    put: (s, v) => mem ? Promise.resolve(mem[s].set(v.id, v)) : tx(s, 'readwrite', st => st.put(v)),
+    del: (s, id) => mem ? Promise.resolve(mem[s].delete(id)) : tx(s, 'readwrite', st => st.delete(id)),
+    all: s => mem ? Promise.resolve([...mem[s].values()]) : tx(s, 'readonly', st => st.getAll()),
+  };
+})();
+
+/* =========================================================
+   Text processing — paragraphs → sentences → ≤200-char chunks
+   Each "sentence" is the unit we highlight, speak and save position by.
+   ========================================================= */
+const MAX_CHUNK = 200; // Chrome (esp. Android) can cut off longer utterances
+
+function splitSentences(text, lang) {
+  text = text.replace(/\s+/g, ' ').trim();
+  if (!text) return [];
+  let parts;
+  try {
+    const seg = new Intl.Segmenter(lang || undefined, { granularity: 'sentence' });
+    parts = [...seg.segment(text)].map(x => x.segment.trim()).filter(Boolean);
+  } catch {
+    parts = (text.match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*\s*|$)/g) || [text]).map(s => s.trim()).filter(Boolean);
+  }
+  // A footnote marker right after a full stop belongs to the sentence before it
+  for (let i = 1; i < parts.length; i++) {
+    const m = parts[i].match(/^((?:[^]*\s*)+)/);
+    if (m) { parts[i - 1] += m[1].trim(); parts[i] = parts[i].slice(m[1].length).trim(); }
+  }
+  parts = parts.filter(Boolean);
+  // Re-join splits after abbreviations/initials ("Mr.", "Dr.", "z. B.", "J.") and
+  // fragments that are only numbers/punctuation (e.g. "1." list markers)
+  const merged = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (i + 1 < parts.length && (ABBREV_END.test(p) || /^[\d\W]{1,4}$/u.test(p.replace(NOTE_RE, '')))) { parts[i + 1] = p + ' ' + parts[i + 1]; continue; }
+    merged.push(p);
+  }
+  return merged.flatMap(s => chunk(s));
+}
+// Common title/abbreviation endings in English, German, French, Spanish, Italian, plus single initials
+const ABBREV_END = /(?:^|[\s(“"'])(?:Mr|Mrs|Ms|Mx|Dr|Prof|Sr|Jr|St|Mt|Rev|Gen|Col|Capt|Lt|Sgt|Hon|vs|etc|approx|No|Nr|Fig|Vol|ca|bzw|usw|vgl|ggf|z\.\s?B|d\.\s?h|u\.\s?a|Hr|Fr|Mme|Mlle|Sra?|Dra?|Sig|[A-ZÄÖÜ])\.$/u;
+
+/** Split an over-long sentence at the best natural break before MAX_CHUNK. */
+function chunk(s, max = MAX_CHUNK) {
+  const out = [];
+  while (s.length > max) {
+    let cut = -1;
+    for (const re of [/[;:—–]\s/g, /,\s/g, /\s/g]) {
+      let m; re.lastIndex = 0;
+      while ((m = re.exec(s)) && m.index < max) if (m.index > max * 0.35 && !insideNote(s, m.index)) cut = m.index;
+      if (cut > 0) break;
+    }
+    if (cut < 0) cut = max;
+    out.push(s.slice(0, cut + 1).trim());
+    s = s.slice(cut + 1).trim();
+  }
+  if (s) out.push(s);
+  return out;
+}
+function insideNote(s, i) { const a = s.lastIndexOf('', i), b = s.lastIndexOf('', i); return a > b; }
+
+/** paragraphs [{k, text}] → chapter {sents:[[text, paraIdx, kind]], paraCount} */
+function buildChapter(title, paras, lang) {
+  const sents = []; let p = 0;
+  for (const para of paras) {
+    const ss = splitSentences(para.text, lang);
+    if (!ss.length) continue;
+    ss.forEach(t => sents.push([t, p, para.k]));
+    p++;
+  }
+  return { title, sents };
+}
+
+/* =========================================================
+   EPUB import
+   container.xml → OPF (metadata, manifest, spine) → TOC (nav or NCX)
+   → each spine document's text, walked block by block.
+   ========================================================= */
+const BLOCK = new Set('address article aside blockquote body dd details dialog div dl dt fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hr li main nav ol p pre section table tbody thead tfoot td th tr ul'.split(' '));
+const SKIP = new Set(['script', 'style', 'head', 'title', 'svg', 'math', 'img', 'video', 'audio', 'object', 'iframe', 'noscript', 'rt', 'rp']);
+
+function resolvePath(base, rel) {
+  rel = rel.split('#')[0];
+  try { rel = decodeURIComponent(rel); } catch {}
+  if (rel.startsWith('/')) rel = rel.slice(1); else rel = (base ? base + '/' : '') + rel;
+  const out = [];
+  for (const seg of rel.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
+  return out.join('/');
+}
+const dirOf = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+
+function parseXml(text, type = 'application/xhtml+xml') {
+  let doc = new DOMParser().parseFromString(text, type);
+  if (doc.getElementsByTagName('parsererror').length) doc = new DOMParser().parseFromString(text, 'text/html'); // tolerate &nbsp; etc.
+  return doc;
+}
+const byTag = (doc, name) => [...doc.getElementsByTagNameNS('*', name)];
+const typeAttr = el => ((el.getAttribute && (el.getAttribute('epub:type') || el.getAttribute('type'))) || '') + ' ' + ((el.getAttribute && el.getAttribute('role')) || '');
+
+function isFootnoteBlock(el) {
+  const t = typeAttr(el);
+  return /\b(footnotes?|endnotes?|rearnotes?|doc-footnote|doc-endnotes?)\b/.test(t) ||
+         /\b(footnote|endnote)s?\b/i.test(el.getAttribute && el.getAttribute('class') || '');
+}
+function isNoteRef(el) {
+  const tag = el.localName.toLowerCase();
+  if (/\b(noteref|doc-noteref)\b/.test(typeAttr(el))) return true;
+  if (tag === 'sup' || tag === 'a') {
+    const txt = el.textContent.trim();
+    if (tag === 'sup' && /^[\[(]?(\d{1,3}|[*†‡§¶]+)[\])]?$/.test(txt)) return true;
+    if (tag === 'a' && /#/.test(el.getAttribute('href') || '') && /^[\[(]?\d{1,3}[\])]?$/.test(txt) && el.closest && el.closest('sup')) return true;
+  }
+  return false;
+}
+
+/** Walk one XHTML document → [{k:'p'|'h'|'fn', text}] */
+function extractParagraphs(doc) {
+  const out = []; let buf = '';
+  const kinds = ['p'];
+  const flush = () => { const t = buf.replace(/\s+/g, ' ').trim(); if (t && t.replace(NOTE_RE, '').trim()) out.push({ k: kinds[kinds.length - 1], text: t }); buf = ''; };
+  (function walk(node) {
+    for (const ch of node.childNodes) {
+      if (ch.nodeType === 3) { buf += ch.data; continue; }
+      if (ch.nodeType !== 1) continue;
+      const tag = ch.localName.toLowerCase();
+      if (SKIP.has(tag)) continue;
+      if (tag === 'br') { buf += ' '; continue; }
+      if (isNoteRef(ch)) { buf += '' + ch.textContent.trim().replace(/[\[\]()]/g, '') + ''; continue; }
+      if (BLOCK.has(tag)) {
+        flush();
+        const parent = kinds[kinds.length - 1];
+        kinds.push(/^h[1-6]$/.test(tag) ? 'h' : isFootnoteBlock(ch) ? 'fn' : parent);
+        walk(ch); flush(); kinds.pop();
+      } else walk(ch);
+    }
+  })(doc.body || doc.documentElement);
+  flush();
+  return out;
+}
+
+async function importEpub(file) {
+  const zip = await JSZip.loadAsync(file);
+  const read = p => { const f = zip.file(p); return f ? f.async('string') : null; };
+
+  // DRM check: encryption.xml that encrypts anything beyond font obfuscation
+  const enc = await read('META-INF/encryption.xml');
+  if (enc) {
+    const algs = byTag(parseXml(enc, 'application/xml'), 'EncryptionMethod').map(e => e.getAttribute('Algorithm') || '');
+    if (algs.some(a => !/idpf\.org\/2008\/embedding|ns\.adobe\.com\/pdf\/enc#RC/.test(a)))
+      throw new Error('This EPUB is DRM-protected (encrypted), so its text can’t be read. Only DRM-free EPUBs can be opened.');
+  }
+
+  const container = await read('META-INF/container.xml');
+  if (!container) throw new Error('Not a valid EPUB (META-INF/container.xml is missing).');
+  const opfPath = byTag(parseXml(container, 'application/xml'), 'rootfile')[0]?.getAttribute('full-path');
+  const opfText = opfPath && await read(opfPath);
+  if (!opfText) throw new Error('Not a valid EPUB (package file not found).');
+  const opf = parseXml(opfText, 'application/xml'), opfDir = dirOf(opfPath);
+
+  const meta = n => (byTag(opf, n)[0]?.textContent || '').trim();
+  const title = meta('title') || file.name.replace(/\.epub$/i, '');
+  const author = meta('creator');
+  const lang = (meta('language') || 'en').trim(); // books without language metadata are treated as English
+
+  const manifest = {};
+  byTag(opf, 'item').forEach(it => manifest[it.getAttribute('id')] = {
+    href: resolvePath(opfDir, it.getAttribute('href') || ''), type: it.getAttribute('media-type') || '', props: it.getAttribute('properties') || ''
+  });
+  const spineEl = byTag(opf, 'spine')[0];
+  const spine = byTag(opf, 'itemref')
+    .filter(r => r.getAttribute('linear') !== 'no')
+    .map(r => manifest[r.getAttribute('idref')]).filter(Boolean);
+
+  // TOC: href (no fragment) → first title pointing into that file
+  const toc = {};
+  const navItem = Object.values(manifest).find(m => /\bnav\b/.test(m.props));
+  const ncxItem = manifest[spineEl?.getAttribute('toc')] || Object.values(manifest).find(m => m.type === 'application/x-dtbncx+xml');
+  try {
+    if (navItem) {
+      const nav = parseXml(await read(navItem.href)), base = dirOf(navItem.href);
+      const tocNav = byTag(nav, 'nav').find(n => /\btoc\b/.test(typeAttr(n))) || byTag(nav, 'nav')[0];
+      tocNav && byTag(tocNav, 'a').forEach(a => { const p = resolvePath(base, a.getAttribute('href') || ''); const t = a.textContent.replace(/\s+/g, ' ').trim(); if (p && t && !toc[p]) toc[p] = t; });
+    }
+    if (!Object.keys(toc).length && ncxItem) {
+      const ncx = parseXml(await read(ncxItem.href), 'application/xml'), base = dirOf(ncxItem.href);
+      byTag(ncx, 'navPoint').forEach(np => {
+        const src = byTag(np, 'content')[0]?.getAttribute('src'); const t = (byTag(np, 'text')[0]?.textContent || '').replace(/\s+/g, ' ').trim();
+        const p = src && resolvePath(base, src); if (p && t && !toc[p]) toc[p] = t;
+      });
+    }
+  } catch (e) { console.warn('TOC parse failed', e); }
+
+  const chapters = [];
+  for (let i = 0; i < spine.length; i++) {
+    busy(`Reading chapter ${i + 1} of ${spine.length}…`);
+    const item = spine[i];
+    if (!/html|xml/.test(item.type) && !/\.x?html?$/i.test(item.href)) continue;
+    const src = await read(item.href); if (!src) continue;
+    const paras = extractParagraphs(parseXml(src));
+    if (!paras.length) continue; // cover pages, image-only pages
+    const firstHead = paras.find(p => p.k === 'h');
+    const t = toc[item.href] || (firstHead && firstHead.text.replace(NOTE_RE, '').slice(0, 80)) || `Section ${chapters.length + 1}`;
+    const ch = buildChapter(t, paras, lang);
+    if (ch.sents.length) chapters.push(ch);
+  }
+  if (!chapters.length) throw new Error('No readable text was found in this EPUB.');
+  return { title, author, lang, format: 'epub', chapters };
+}
+
+/** Saves a parsed book; returns its id. Content and metadata are stored separately so the library loads fast. */
+async function saveBook(parsed, file) {
+  const id = uid();
+  const counts = parsed.chapters.map(c => c.sents.length);
+  await DB.put('content', { id, chapters: parsed.chapters });
+  await DB.put('books', {
+    id, title: parsed.title, author: parsed.author, lang: parsed.lang, format: parsed.format,
+    chapterTitles: parsed.chapters.map(c => c.title), counts, total: counts.reduce((a, b) => a + b, 0),
+    fingerprint: file.name + ':' + file.size, addedAt: Date.now(),
+  });
+  return id;
+}
+
+async function handleFile(file) {
+  if (!file) return;
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  const existing = (await DB.all('books')).find(b => b.fingerprint === file.name + ':' + file.size);
+  if (existing) { toast('Already in your library — opening it.'); return openBook(existing.id); }
+  try {
+    busy('Opening ' + file.name + '…');
+    let parsed;
+    if (ext === 'epub' || file.type === 'application/epub+zip') parsed = await importEpub(file);
+    else if (ext === 'pdf' || file.type === 'application/pdf') throw new Error('PDF import is coming in Stage 2. For now, please use an EPUB.');
+    else throw new Error('Please choose an .epub file.');
+    busy('Saving…');
+    const id = await saveBook(parsed, file);
+    busy();
+    toast(`Added “${parsed.title}”`);
+    await renderLibrary();
+    openBook(id);
+  } catch (e) {
+    busy(); console.error(e);
+    alertCard(e.message || String(e));
+  }
+}
+function alertCard(msg) { toast(msg, 6000); }
+
+/* =========================================================
+   Library view
+   ========================================================= */
+const COVER_COLORS = ['#2f6f5e', '#8a5a2b', '#4b5d8a', '#7a3e5c', '#5f6b2e', '#2e6a7a', '#8a4b3a'];
+const hash = s => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7);
+const coverHtml = b => `<div class="cover" style="background:${COVER_COLORS[Math.abs(hash(b.title)) % COVER_COLORS.length]}">${esc((b.title.trim()[0] || '?').toUpperCase())}</div>`;
+const pctOf = (b, pr) => {
+  if (!pr || !b.total) return 0;
+  const before = b.counts.slice(0, pr.ch).reduce((a, c) => a + c, 0);
+  return Math.min(100, Math.round(((before + pr.s) / b.total) * 100));
+};
+
+async function renderLibrary() {
+  const books = (await DB.all('books')).sort((a, b) => (b.lastRead || b.addedAt) - (a.lastRead || a.addedAt));
+  const progress = Object.fromEntries((await DB.all('progress')).map(p => [p.id, p]));
+  $('#libHeading').hidden = !books.length;
+  $('#bookList').innerHTML = books.map(b => {
+    const pct = pctOf(b, progress[b.id]);
+    return `<div class="card book" data-id="${b.id}">
+      ${coverHtml(b)}
+      <div class="info"><div class="t">${esc(b.title)}</div><div class="a">${esc(b.author || 'Unknown author')} · ${b.chapterTitles.length} ch.</div>
+        <div class="bar"><i style="width:${pct}%"></i></div><div class="a">${pct}% read</div></div>
+      <div class="acts">
+        <button class="btn primary" data-open="${b.id}">${pct > 0 ? 'Continue' : 'Start'}</button>
+        <button class="btn ghost small danger" data-del="${b.id}" aria-label="Delete ${esc(b.title)}">Delete</button>
+      </div></div>`;
+  }).join('');
+  // "Continue" hero for the most recent book
+  const last = books.find(b => b.id === S.lastBookId);
+  const pr = last && progress[last.id];
+  $('#continueBox').innerHTML = last && pr ? `<div class="card continue-hero" style="margin-bottom:14px">${coverHtml(last)}
+      <div class="info"><div class="small muted">Continue listening</div><div style="font-weight:640;margin:2px 0" class="t">${esc(last.title)}</div>
+      <div class="small muted">${esc(last.chapterTitles[pr.ch] || '')} · ${pctOf(last, pr)}%</div></div>
+      <button class="btn primary" data-open="${last.id}" aria-label="Continue ${esc(last.title)}">▶</button></div>` : '';
+}
+
+/* =========================================================
+   Reader view — state, rendering, highlighting, navigation
+   ========================================================= */
+const R = {
+  book: null,       // metadata record
+  content: null,    // {chapters}
+  ch: 0, s: 0,      // current position
+  userScrollAt: 0,  // last manual scroll time (pauses auto-scroll briefly)
+};
+const curSents = () => R.content.chapters[R.ch].sents;
+
+async function openBook(id) {
+  const [book, content, pr] = await Promise.all([DB.get('books', id), DB.get('content', id), DB.get('progress', id)]);
+  if (!book || !content) { toast('That book could not be loaded.'); return; }
+  Player.stop();
+  R.book = book; R.content = content;
+  R.ch = pr ? clamp(pr.ch, 0, content.chapters.length - 1) : 0;
+  R.s = pr ? clamp(pr.s, 0, content.chapters[R.ch].sents.length - 1) : 0;
+  S.lastBookId = id; saveSettings();
+  book.lastRead = Date.now(); DB.put('books', book);
+  $('#readerText').lang = book.lang || 'en';
+  renderChapter();
+  showTab('reader');
+  if (Neural.active) Neural.start().catch(() => {}); // load the model in the background
+}
+
+function renderChapter() {
+  const chap = R.content.chapters[R.ch];
+  // Show the TOC title only if the chapter doesn't start with its own heading
+  let html = chap.sents[0]?.[2] === 'h' ? '' : `<div class="chap-title">${esc(chap.title)}</div>`, para = -1, open = false;
+  chap.sents.forEach(([t, p, k], i) => {
+    if (p !== para) { if (open) html += '</p>'; html += `<p class="${k}">`; para = p; open = true; }
+    html += `<span class="s" data-i="${i}">${esc(t).replace(NOTE_RE, '<sup>$1</sup>')}</span> `;
+  });
+  if (open) html += '</p>';
+  $('#readerText').innerHTML = html;
+  $('#readerEmpty').hidden = true;
+  $('#topTitle').textContent = chap.title;
+  Media.meta();
+  highlight(true);
+}
+
+function highlight(instant) {
+  $$('.s.cur', $('#readerText')).forEach(e => e.classList.remove('cur'));
+  const el = $(`.s[data-i="${R.s}"]`, $('#readerText'));
+  if (el) {
+    el.classList.add('cur');
+    // Auto-scroll unless the user scrolled manually in the last 4 s
+    if (Date.now() - R.userScrollAt > 4000) {
+      const v = $('#view-reader').getBoundingClientRect(), r = el.getBoundingClientRect();
+      if (instant || r.top < v.top + v.height * 0.2 || r.bottom > v.top + v.height * 0.7)
+        el.scrollIntoView({ block: 'center', behavior: instant ? 'auto' : 'smooth' });
+    }
+  }
+  updateProgressUI();
+}
+
+function updateProgressUI() {
+  if (!R.book) return;
+  const pct = pctOf(R.book, { ch: R.ch, s: R.s });
+  $('#progPct').textContent = pct + '%';
+  $('#progBar').style.width = pct + '%';
+  $('#progCh').textContent = `Ch ${R.ch + 1}/${R.content.chapters.length}`;
+}
+
+/** Persist position (chapter + sentence). Called on every sentence change, pause and page hide. */
+let lastSaved = '';
+function savePosition() {
+  if (!R.book) return;
+  const key = R.book.id + ':' + R.ch + ':' + R.s;
+  if (key === lastSaved) return; lastSaved = key;
+  DB.put('progress', { id: R.book.id, ch: R.ch, s: R.s, at: Date.now() }).catch(() => {});
+}
+
+/** Move to a position; re-renders if the chapter changes. Keeps playing if we were playing. */
+function goTo(ch, s, { speak = Player.playing } = {}) {
+  const chapters = R.content.chapters;
+  if (ch !== R.ch) { R.ch = clamp(ch, 0, chapters.length - 1); R.s = clamp(s, 0, chapters[R.ch].sents.length - 1); R.userScrollAt = 0; renderChapter(); }
+  else { R.s = clamp(s, 0, curSents().length - 1); highlight(); }
+  savePosition();
+  if (speak) Player.speakCurrent(); else Player.stop(true);
+}
+function step(delta) {
+  let { ch, s } = R; s += delta;
+  if (s < 0) { if (ch === 0) s = 0; else { ch--; s = R.content.chapters[ch].sents.length - 1; } }
+  else if (s >= R.content.chapters[ch].sents.length) {
+    if (ch >= R.content.chapters.length - 1) return false; ch++; s = 0;
+  }
+  goTo(ch, s); return true;
+}
+
+/* =========================================================
+   Speech engine — Web Speech API, one sentence per utterance
+   - Every utterance gets a generation number; events from cancelled
+     utterances are ignored (cancel() fires onend/onerror in Chrome).
+   - The current utterance is kept referenced (Chrome GC bug drops onend).
+   - Watchdog moves on if onend never arrives.
+   - Desktop Chrome cuts online voices after ~15 s: pause/resume nudge.
+   ========================================================= */
+const synth = window.speechSynthesis;
+const Player = {
+  playing: false, gen: 0, utt: null, watchdog: 0, nudge: 0, errors: 0,
+  src: null,          // current Web Audio source (neural voice)
+  waitStart: 0,       // when we started waiting for neural audio (stall detection)
+
+  toggle() { this.playing ? this.pause() : this.play(); },
+
+  play() { // must be called from a user tap (Android requirement)
+    if (!synth) { toast('Speech isn’t available in this browser. Try Chrome or Edge.'); return; }
+    if (!R.book) return;
+    if (Neural.active) Neural.audio(); // unlock Web Audio inside the tap
+    Media.start();                     // lock-screen / headphone controls
+    this.playing = true; this.errors = 0; Neural.stalls = 0; setPlayIcon();
+    this.speakCurrent();
+  },
+
+  pause() { this.stop(); savePosition(); },
+
+  stop(silent) {
+    const was = this.playing;
+    this.playing = false; this.gen++;
+    clearTimeout(this.watchdog); clearInterval(this.nudge);
+    if (synth && (synth.speaking || synth.pending)) synth.cancel();
+    this.stopSource(); setBuffering(false);
+    if (was) Media.stop();
+    if (was || !silent) setPlayIcon();
+  },
+  stopSource() { if (this.src) { this.src.onended = null; try { this.src.stop(); } catch {} this.src = null; } },
+
+  prepare(text) {
+    return text.replace(NOTE_RE, '').replace(/\s+/g, ' ').trim(); // Stage 2 adds skip rules + pronunciation fixes here
+  },
+
+  speakCurrent() {
+    if (!this.playing) { this.playing = true; setPlayIcon(); Media.start(); }
+    this.lastStart = Date.now();
+    const g = ++this.gen;
+    clearTimeout(this.watchdog); clearInterval(this.nudge);
+    this.stopSource();
+    if (Neural.active) return this.speakNeural(g);
+    const text = this.prepare(curSents()[R.s][0]);
+    if (!text || !/[\p{L}\p{N}]/u.test(text)) { setTimeout(() => g === this.gen && this.next(), 0); return; }
+
+    const u = new SpeechSynthesisUtterance(text);
+    const v = Voices.current();
+    if (v) { u.voice = v; u.lang = v.lang; } else if (R.book.lang) u.lang = R.book.lang;
+    u.rate = S.rate; u.pitch = S.pitch;
+    u.onend = () => { if (g === this.gen && this.playing) { this.errors = 0; this.next(); } };
+    u.onerror = e => {
+      if (g !== this.gen || /interrupted|canceled/.test(e.error)) return;
+      console.warn('TTS error', e.error);
+      if (++this.errors >= 3) { this.stop(); toast('The voice stopped responding. Try another voice in Settings.', 5000); return; }
+      setTimeout(() => g === this.gen && this.playing && this.next(), 300);
+    };
+    this.utt = u; // keep a reference
+
+    const go = () => { if (g !== this.gen) return; synth.speak(u); this.arm(g, text); };
+    if (synth.speaking || synth.pending) { synth.cancel(); setTimeout(go, 60); } // Chrome may drop a speak() issued right after cancel()
+    else go();
+  },
+
+  /** Watchdog + desktop keep-alive for the current utterance */
+  arm(g, text) {
+    const v = Voices.current();
+    if (!isAndroid && v && !v.localService) {
+      this.nudge = setInterval(() => { if (g === this.gen && synth.speaking) { synth.pause(); synth.resume(); } }, 10000);
+    }
+    let tries = 0;
+    const expect = Math.max(4000, (text.length * 85) / S.rate) + 4000;
+    const check = () => {
+      if (g !== this.gen || !this.playing) return;
+      if (synth.speaking && ++tries < 3) { this.watchdog = setTimeout(check, expect); return; } // slow voice: give it more time
+      console.warn('TTS watchdog: no end event, moving on');
+      this.next();
+    };
+    this.watchdog = setTimeout(check, expect);
+  },
+
+  next() {
+    if (!step(+1)) { this.stop(); toast('End of book 🎉'); }
+  },
+
+  /** Neural path: play the (pre-made) audio for the current sentence, queue the next 3. */
+  async speakNeural(g) {
+    if (synth && (synth.speaking || synth.pending)) synth.cancel();
+    if (Neural.status !== 'ready') {
+      setBuffering(true);
+      try { await Neural.start(); }
+      catch (e) { if (g === this.gen) { setBuffering(false); neuralFallback('The neural voice could not start (' + e.message + ').'); this.speakCurrent(); } return; }
+      if (g !== this.gen || !this.playing) return;
+    }
+    if (!KVOICES.some(v => v[0] === S.kvoice)) S.kvoice = 'af_heart';
+    const { ch, s } = R;
+    const p = Neural.request(ch, s);
+    Neural.prefetch(ch, s);
+    const entry = Neural.cache.get(Neural.key(ch, s));
+    const waiting = entry && !entry.done;
+    if (waiting) { setBuffering(true); this.waitStart = performance.now(); }
+    let res;
+    try { res = await p; }
+    catch (e) {
+      if (g !== this.gen || !this.playing) return;
+      if (e.message === 'dropped') return this.speakNeural(g); // was pruned; ask again
+      setBuffering(false);
+      if (++this.errors >= 3) { neuralFallback('The neural voice kept failing (' + e.message + ').'); this.errors = 0; this.speakCurrent(); }
+      else this.next();
+      return;
+    }
+    if (g !== this.gen || !this.playing) return;
+    setBuffering(false);
+    // A noticeable wait in the middle of reading = the device isn't keeping up
+    if (waiting && this.waitStart && R.s + R.ch > 0) {
+      const waited = performance.now() - this.waitStart;
+      if (waited > 1500) Neural.stalls++;
+      const sf = Neural.speedFactor();
+      if (Neural.stalls >= 3 && sf && sf.n >= 4 && sf.factor < 1) {
+        neuralFallback(`The neural voice is too slow on this device: it needed ${sf.work.toFixed(1)} s to make ${sf.audio.toFixed(1)} s of speech (${sf.factor.toFixed(2)}× real time; at least 1× is needed).`);
+        this.speakCurrent(); return;
+      }
+    }
+    this.waitStart = 0;
+    if (!res) { this.next(); return; } // nothing to say in this "sentence"
+    this.errors = 0;
+    const ctx = Neural.audio();
+    const src = ctx.createBufferSource();
+    src.buffer = res.buffer; src.playbackRate.value = Neural.playbackRate();
+    src.connect(ctx.destination);
+    src.onended = () => { if (g === this.gen && this.playing) this.next(); };
+    this.src = src; src.start();
+  },
+};
+
+function setBuffering(on) { $('#playBtn').classList.toggle('buffering', !!on); }
+
+/* =========================================================
+   Lock screen + headphone controls (Media Session API)
+   Chrome only shows media controls while an <audio> element is playing,
+   so a near-silent loop plays during reading. It also keeps Chrome from
+   suspending the page as eagerly when the screen is off (best effort).
+   Headphone buttons arrive as the same media actions:
+     play/pause = play/pause · next/previous track = next/previous sentence
+   If the audio is interrupted by the system (headphones unplugged, a call),
+   reading pauses too.
+   ========================================================= */
+const Media = {
+  el: null, expectPause: 0, supported: 'mediaSession' in navigator,
+
+  /** 10 s of 8 kHz audio at ±1/32768 — inaudible, but counts as real media for Chrome */
+  silentUrl() {
+    const sr = 8000, n = sr * 10, buf = new DataView(new ArrayBuffer(44 + n * 2));
+    const w = (o, str) => [...str].forEach((c, i) => buf.setUint8(o + i, c.charCodeAt(0)));
+    w(0, 'RIFF'); buf.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); buf.setUint32(16, 16, true);
+    buf.setUint16(20, 1, true); buf.setUint16(22, 1, true); buf.setUint32(24, sr, true); buf.setUint32(28, sr * 2, true);
+    buf.setUint16(32, 2, true); buf.setUint16(34, 16, true); w(36, 'data'); buf.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) buf.setInt16(44 + i * 2, (i & 1) ? 1 : -1, true);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  },
+
+  init() {
+    this.el = new Audio(this.silentUrl());
+    this.el.loop = true; this.el.preload = 'auto'; this.el.setAttribute('playsinline', '');
+    // A pause we didn't ask for = the system interrupted us (headphones unplugged, phone call…)
+    this.el.addEventListener('pause', () => {
+      if (this.expectPause > 0) { this.expectPause--; return; }
+      if (Player.playing) { Player.pause(); toast('Paused'); }
+    });
+    if (!this.supported) return;
+    const ms = navigator.mediaSession, on = (a, fn) => { try { ms.setActionHandler(a, fn); } catch {} };
+    on('play', () => { if (R.book && !Player.playing) Player.play(); });
+    on('pause', () => { if (Player.playing) Player.pause(); });
+    on('stop', () => { if (Player.playing) Player.pause(); });
+    on('previoustrack', () => R.book && step(-1));
+    on('nexttrack', () => R.book && step(+1));
+    on('seekbackward', null); on('seekforward', null); on('seekto', null); // no scrubber: sentences, not a timeline
+  },
+
+  start() {
+    if (!this.el) return;
+    if (this.el.paused) this.el.play().catch(() => {}); // must happen inside the play tap the first time
+    if (this.supported) navigator.mediaSession.playbackState = 'playing';
+    this.meta();
+  },
+  stop() {
+    if (!this.el) return;
+    if (!this.el.paused) { this.expectPause++; this.el.pause(); }
+    if (this.supported) navigator.mediaSession.playbackState = R.book ? 'paused' : 'none';
+  },
+  /** What the lock screen shows: chapter, book, author */
+  meta() {
+    if (!this.supported || !R.book || typeof MediaMetadata === 'undefined') return;
+    const ch = R.content.chapters[R.ch];
+    const t = `${R.book.title}|${ch.title}`;
+    if (this._t === t) return; this._t = t;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: ch.title, artist: R.book.title + (R.book.author ? ' · ' + R.book.author : ''), album: 'Read Aloud',
+      artwork: [192, 512].map(n => ({ src: new URL(`icon-${n}.png`, location.href).href, sizes: `${n}x${n}`, type: 'image/png' })),
+    });
+  },
+};
+
+function setPlayIcon() {
+  const b = $('#playBtn');
+  b.innerHTML = Player.playing
+    ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
+  b.setAttribute('aria-label', Player.playing ? 'Pause' : 'Play');
+}
+
+/* =========================================================
+   Neural voice (Kokoro-82M) — optional, off by default
+   ---------------------------------------------------------
+   How it works:
+   1. Download (once): model + tokenizer from Hugging Face, the ONNX
+      runtime (.wasm) from jsDelivr, and a few English voices. Every file
+      is stored in IndexedDB ('assets', keyed by its URL).
+   2. A module Web Worker runs kokoro-js. Inside it, fetch() is patched
+      to answer those URLs from the stored copies, so after the download
+      it never needs the network (works offline and from file://).
+   3. Each sentence is synthesised to 24 kHz audio and played with the
+      Web Audio API. The next 3 sentences are made ahead of time, so
+      playback has no gaps if the device is fast enough.
+   4. If the device can't keep up (generating slower than real time),
+      we switch back to system voices and say why.
+   ========================================================= */
+const KOKORO = {
+  repo: 'onnx-community/Kokoro-82M-v1.0-ONNX',
+  hf: 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/',
+  ort: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/dist/',
+  variants: {
+    // 'full' runs on the graphics chip (WebGPU) or the processor — the speed test picks the faster.
+    // Even on the processor it's ~1.5× faster than the compressed model (measured: 0.34× vs 0.23× real time).
+    full: { file: 'onnx/model.onnx', dtype: 'fp32', devices: ['webgpu', 'wasm'], size: 325532232, label: 'Best' },
+    cpu: { file: 'onnx/model_quantized.onnx', dtype: 'q8', devices: ['wasm'], size: 92361116, label: 'Smaller' },
+  },
+  core: [['config.json', 2000], ['tokenizer.json', 4000], ['tokenizer_config.json', 1000]],
+  ortFiles: [['ort-wasm-simd-threaded.jsep.wasm', 21596019]], // the JS loader for it is already in the bundle
+  voiceSize: 522240,
+  preload: ['af_heart', 'af_bella', 'bf_emma', 'am_michael', 'bm_george'],
+};
+// English Kokoro voices. Quality labels follow the model authors' own grading.
+const KVOICES = [
+  ['af_heart', 'Heart', 'US', 'female', 'best'], ['af_bella', 'Bella', 'US', 'female', 'best'],
+  ['bf_emma', 'Emma', 'UK', 'female', 'very good'], ['af_nicole', 'Nicole', 'US', 'female', 'very good, soft'],
+  ['am_michael', 'Michael', 'US', 'male', 'good'], ['am_fenrir', 'Fenrir', 'US', 'male', 'good'], ['am_puck', 'Puck', 'US', 'male', 'good'],
+  ['bm_george', 'George', 'UK', 'male', 'good'], ['bm_fable', 'Fable', 'UK', 'male', 'good'], ['bf_isabella', 'Isabella', 'UK', 'female', 'good'],
+  ['af_sarah', 'Sarah', 'US', 'female', 'good'], ['af_kore', 'Kore', 'US', 'female', 'good'], ['af_aoede', 'Aoede', 'US', 'female', 'good'],
+];
+const voiceUrl = id => KOKORO.hf + 'voices/' + id + '.bin';
+const MB = b => (b / 1048576).toFixed(b < 10485760 ? 1 : 0) + ' MB';
+
+/** The synthesis engine. Normally runs inside a Web Worker (serialised with toString,
+    scope = the worker's self). Where the browser refuses module workers (pages opened as
+    file://), it runs on the page with a message-passing shim as scope instead. */
+function neuralWorker(scope) {
+  // Our copies in IndexedDB are the cache: give transformers.js/kokoro-js a do-nothing Cache Storage
+  // so they don't store a second ~100 MB copy (fetch below serves the files instead).
+  const noCache = { match: async () => undefined, put: async () => {}, delete: async () => false, keys: async () => [] };
+  try { Object.defineProperty(globalThis, 'caches', { value: { open: async () => noCache, has: async () => false, match: async () => undefined, delete: async () => false, keys: async () => [] }, configurable: true }); } catch (e) {}
+  const files = new Map(); // url → Blob
+  const realFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (input, init) => {
+    const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+    const blob = files.get(url) || files.get(url.split('?')[0]);
+    if (blob) return Promise.resolve(new Response(blob, { status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(blob.size) } }));
+    return realFetch(input, init);
+  };
+  let tts = null, queue = [], working = false;
+  const post = (m, t) => scope.postMessage(m, t || []);
+  async function pump() {
+    if (working || !tts) return;
+    const job = queue.shift(); if (!job) return;
+    working = true;
+    try {
+      const t0 = performance.now();
+      const out = await tts.generate(job.text, { voice: job.voice, speed: job.speed });
+      const pcm = out.audio;
+      post({ type: 'audio', id: job.id, pcm, sr: out.sampling_rate, ms: performance.now() - t0 }, [pcm.buffer]);
+    } catch (e) { post({ type: 'jobError', id: job.id, error: String((e && e.message) || e) }); }
+    working = false; pump();
+  }
+  scope.onmessage = async ({ data: m }) => {
+    try {
+      if (m.type === 'files') { for (const [u, b] of Object.entries(m.files)) files.set(u, b); }
+      else if (m.type === 'init') {
+        for (const [u, b] of Object.entries(m.files)) files.set(u, b);
+        // The library arrives as text; all blob URLs are made on this side (page-made URLs can't be
+        // loaded inside a worker when the page was opened as file://).
+        let lib;
+        if (m.esm) {
+          // Module worker (hosted app): import the bundle as a module. Its URL is also what the
+          // runtime uses to start extra threads, so multi-core works when the page is isolated.
+          lib = await import(URL.createObjectURL(new Blob([m.libText], { type: 'text/javascript' })));
+        } else {
+          // Classic worker / page (file://): rewrite the module into a classic script and run it.
+          const EXP = 'export{Ef as KokoroTTS,kf as TextSplitterStream,Mf as env,Wg as tfEnv}';
+          const classic = '(function(){"use strict";\n' + m.libText
+            .replace(EXP, 'self.__kokoro={KokoroTTS:Ef,TextSplitterStream:kf,env:Mf,tfEnv:Wg};')
+            .replace(/import\.meta\.url/g, 'self.__kokoroSrc').replace(/import\.meta\.dirname/g, 'undefined')
+            .replace(/import\.meta/g, '({url:self.__kokoroSrc})') + '\n})();';
+          globalThis.__kokoroSrc = String(globalThis.location && globalThis.location.href);
+          (0, eval)(classic);
+          lib = globalThis.__kokoro;
+        }
+        const wasmUrl = URL.createObjectURL(new Blob([m.ortWasm], { type: 'application/wasm' }));
+        lib.env.wasmPaths = { wasm: wasmUrl }; // only the .wasm → the bundled loader is used
+        try { lib.tfEnv.backends.onnx.wasm.numThreads = m.threads; } catch (e) {}
+        tts = await lib.KokoroTTS.from_pretrained(m.repo, { dtype: m.dtype, device: m.device });
+        post({ type: 'ready' }); pump();
+      } else if (m.type === 'synth') { queue.push(m); pump(); }
+      else if (m.type === 'prune') { // drop queued jobs we no longer need (user jumped elsewhere)
+        const keep = new Set(m.keep), dropped = queue.filter(j => !keep.has(j.id)).map(j => j.id);
+        queue = queue.filter(j => keep.has(j.id));
+        if (dropped.length) post({ type: 'dropped', ids: dropped });
+      }
+    } catch (e) { post({ type: 'fatal', error: String((e && e.message) || e) }); }
+  };
+  post({ type: 'alive' });
+}
+
+/** Start the engine: a real Web Worker if allowed, else on the page (same code, same messages). */
+async function spawnEngine(asUrl) {
+  // 1st choice: module worker (hosted app; allows multi-core). 2nd: classic worker (file://). 3rd: on the page.
+  for (const [mode, opts] of [['module', { type: 'module' }], ['classic', undefined]]) {
+    try {
+      const w = new Worker(asUrl('(' + neuralWorker.toString() + ')(self)', 'text/javascript'), opts);
+      const ok = await new Promise(res => {
+        w.onmessage = ({ data }) => res(data.type === 'alive');
+        w.onerror = e => { e.preventDefault?.(); res(false); };
+        setTimeout(() => res(false), 5000);
+      });
+      if (ok) { Neural.mode = mode; return w; }
+      w.terminate();
+    } catch {}
+  }
+  // Fallback: in-page engine. Messages are delivered asynchronously, like a worker's.
+  const page = { onmessage: null, postMessage: m => setTimeout(() => fake.onmessage?.({ data: m }), 0) };
+  const fake = { onmessage: null, onerror: null, terminate() { page.onmessage = null; },
+                 postMessage: m => setTimeout(() => page.onmessage?.({ data: m }), 0) };
+  neuralWorker(page);
+  Neural.mode = 'page';
+  return fake;
+}
+
+const Neural = {
+  status: 'idle', // idle | loading | ready | error
+  error: '', worker: null, readyP: null, ctx: null,
+  gpuOk: false,      // a WebGPU adapter is available
+  mode: '',          // 'module' | 'classic' (background worker) | 'page' (fallback when workers are blocked)
+  jobs: new Map(),   // id → {resolve, reject}
+  cache: new Map(),  // "ch:s|voice|speed" → {id, promise, done}
+  nextId: 1,
+  log: [],           // recent {ms, dur} for speed tracking
+  stalls: 0,
+
+  get active() { return S.engine === 'neural' && !!S.neuralInstalled; },
+  modelSpeed() { return clamp(S.rate, 0.5, 2); },        // Kokoro's own speed control
+  playbackRate() { return S.rate > 2 ? S.rate / 2 : 1; }, // beyond 2× we speed up playback
+
+  /** All files a variant needs: [{url, size}] */
+  manifest(variant) {
+    const v = KOKORO.variants[variant];
+    return [
+      ...KOKORO.core.map(([f, size]) => ({ url: KOKORO.hf + f, size })),
+      { url: KOKORO.hf + v.file, size: v.size },
+      ...KOKORO.ortFiles.map(([f, size]) => ({ url: KOKORO.ort + f, size })),
+      ...KOKORO.preload.map(id => ({ url: voiceUrl(id), size: KOKORO.voiceSize })),
+    ];
+  },
+  totalSize(variant) { return this.manifest(variant).reduce((a, f) => a + f.size, 0); },
+
+  /** Streamed download of one file into IndexedDB, reporting bytes as they arrive */
+  async fetchToDb(url, onBytes, signal) {
+    const res = await fetch(url, { signal, cache: 'no-store' });
+    if (!res.ok) throw new Error(`Download failed (${res.status}) for ${url.split('/').pop()}`);
+    const chunks = [], reader = res.body.getReader();
+    for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); onBytes(value.byteLength); }
+    const blob = new Blob(chunks);
+    await DB.put('assets', { id: url, blob, size: blob.size, at: Date.now() });
+    return blob;
+  },
+
+  async download(variant, onProgress, signal) {
+    const files = this.manifest(variant), total = this.totalSize(variant);
+    let done = 0;
+    try { await navigator.storage?.persist?.(); } catch {} // ask Chrome not to evict it
+    for (const f of files) {
+      const have = await DB.get('assets', f.url);
+      if (have) { done += f.size; onProgress(done, total, f.url); continue; } // resume where a previous attempt stopped
+      let got = 0;
+      await this.fetchToDb(f.url, n => { got += n; onProgress(done + Math.min(got, f.size), total, f.url); }, signal);
+      done += f.size; onProgress(done, total, f.url);
+    }
+  },
+
+  async remove() {
+    this.shutdown();
+    const all = await DB.all('assets');
+    await Promise.all(all.map(a => DB.del('assets', a.id)));
+  },
+
+  shutdown() {
+    this.worker?.terminate(); this.worker = null; this.readyP = null; this.status = 'idle';
+    this.jobs.forEach(j => j.reject(new Error('stopped'))); this.jobs.clear(); this.cache.clear();
+  },
+
+  audio() { // AudioContext is created/resumed from a user tap
+    if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    return this.ctx;
+  },
+
+  /** Start the worker and load the model (a few seconds). Safe to call repeatedly. */
+  start() {
+    if (this.readyP) return this.readyP;
+    this.status = 'loading'; this.error = ''; renderNeuralUI();
+    this.readyP = (async () => {
+      const variant = KOKORO.variants[S.neuralInstalled];
+      const files = {};
+      for (const f of this.manifest(S.neuralInstalled)) {
+        const a = await DB.get('assets', f.url);
+        if (!a) throw new Error('Some voice files are missing — please download the neural voice again.');
+        files[f.url] = a.blob;
+      }
+      for (const [id] of KVOICES) { const a = await DB.get('assets', voiceUrl(id)); if (a) files[voiceUrl(id)] = a.blob; }
+      const asUrl = (blob, type) => URL.createObjectURL(new Blob([blob], { type }));
+      const ortWasm = files[KOKORO.ort + KOKORO.ortFiles[0][0]];
+      const libText = $('#kokoroLib').textContent;
+      const w = await spawnEngine(asUrl);
+      this.worker = w;
+      await new Promise((resolve, reject) => {
+        w.onerror = e => reject(new Error(e.message || 'The voice engine could not start in this browser.'));
+        w.onmessage = ({ data: m }) => {
+          if (m.type === 'ready') resolve();
+          else if (m.type === 'fatal') reject(new Error(m.error));
+          else if (m.type === 'alive') {}
+          else this.onMessage(m);
+        };
+        w.postMessage({ type: 'init', files, libText, ortWasm, esm: this.mode === 'module', threads: this.threads(), repo: KOKORO.repo, dtype: variant.dtype, device: this.device() });
+      });
+      w.onmessage = ({ data: m }) => this.onMessage(m);
+      this.status = 'ready'; renderNeuralUI();
+    })().catch(e => {
+      this.status = 'error'; this.error = e.message || String(e); this.readyP = null;
+      this.worker?.terminate(); this.worker = null; renderNeuralUI();
+      throw e;
+    });
+    return this.readyP;
+  },
+
+  onMessage(m) {
+    if (m.type === 'audio') {
+      const j = this.jobs.get(m.id); if (!j) return; this.jobs.delete(m.id);
+      const ctx = this.audio();
+      const buf = ctx.createBuffer(1, m.pcm.length, m.sr); buf.copyToChannel(m.pcm, 0);
+      const dur = m.pcm.length / m.sr;
+      this.log.push({ ms: m.ms, dur }); if (this.log.length > 12) this.log.shift();
+      j.resolve({ buffer: buf, dur, ms: m.ms });
+    } else if (m.type === 'jobError') {
+      const j = this.jobs.get(m.id); if (j) { this.jobs.delete(m.id); j.reject(new Error(m.error)); }
+    } else if (m.type === 'dropped') {
+      m.ids.forEach(id => { const j = this.jobs.get(id); if (j) { this.jobs.delete(id); j.reject(new Error('dropped')); } });
+    } else if (m.type === 'fatal') { this.status = 'error'; this.error = m.error; renderNeuralUI(); }
+  },
+
+  /** Make sure a (non-preloaded) voice is stored and known to the worker; downloads ~0.5 MB if needed. */
+  async ensureVoice(id) {
+    const url = voiceUrl(id);
+    let a = await DB.get('assets', url);
+    if (!a) { await this.fetchToDb(url, () => {}); a = await DB.get('assets', url); }
+    this.worker?.postMessage({ type: 'files', files: { [url]: a.blob } });
+  },
+
+  /** CPU threads for the processor version. More than 1 needs a cross-origin-isolated page
+      (the hosted app's service worker provides that). S24 Ultra: 8 cores → 4 threads. */
+  /** Which chip runs the model: the speed test's pick, else GPU if available (full model only) */
+  device() {
+    const v = KOKORO.variants[S.neuralInstalled]; if (!v) return 'wasm';
+    if (v.devices.includes(S.neuralDevice)) return S.neuralDevice;
+    return v.devices.includes('webgpu') && this.gpuOk ? 'webgpu' : 'wasm';
+  },
+  threads() {
+    if (!self.crossOriginIsolated || this.mode !== 'module') return 1;
+    const n = navigator.hardwareConcurrency || 2;
+    return Math.min(4, n >= 6 ? Math.ceil(n / 2) : n);
+  },
+  engineLabel(device = this.device()) {
+    if (device === 'webgpu') return 'graphics chip';
+    const t = this.threads();
+    return `processor (${t} core${t > 1 ? 's' : ''})`;
+  },
+
+  /** Raw synthesis request → Promise<{buffer, dur, ms}> */
+  synth(text, voice = S.kvoice, speed = this.modelSpeed()) {
+    const id = this.nextId++;
+    const promise = new Promise((resolve, reject) => this.jobs.set(id, { resolve, reject }));
+    this.worker.postMessage({ type: 'synth', id, text, voice, speed });
+    return { id, promise };
+  },
+
+  key: (ch, s) => `${ch}:${s}|${S.kvoice}|${Neural.modelSpeed()}`,
+
+  /** Audio for one book sentence (cached), or null for sentences with nothing to say */
+  request(ch, s) {
+    const k = this.key(ch, s);
+    let e = this.cache.get(k);
+    if (e) return e.promise;
+    const text = Player.prepare(R.content.chapters[ch].sents[s][0]);
+    if (!/[\p{L}\p{N}]/u.test(text)) { e = { id: 0, promise: Promise.resolve(null), done: true }; }
+    else { const j = this.synth(text); e = { id: j.id, promise: j.promise, done: false }; j.promise.then(() => { e.done = true; }, () => { this.cache.delete(k); }); }
+    this.cache.set(k, e);
+    return e.promise;
+  },
+
+  /** Queue the current sentence + the next 5; drop queued work outside that window. */
+  prefetch(ch, s, ahead = 5) {
+    const keep = [];
+    let pos = { ch, s };
+    for (let i = 0; i <= ahead && pos; i++) {
+      this.request(pos.ch, pos.s).catch(() => {});
+      keep.push(this.key(pos.ch, pos.s));
+      pos = nextPos(pos.ch, pos.s);
+    }
+    const keepIds = keep.map(k => this.cache.get(k)?.id).filter(Boolean);
+    for (const [k, e] of this.cache) if (!keep.includes(k) && !e.done) this.cache.delete(k);
+    this.worker?.postMessage({ type: 'prune', keep: keepIds });
+    // keep memory bounded: at most 10 finished sentences
+    const finished = [...this.cache].filter(([k, e]) => e.done && !keep.includes(k));
+    finished.slice(0, Math.max(0, finished.length - 6)).forEach(([k]) => this.cache.delete(k));
+  },
+
+  /** Speed factor over recent sentences: seconds of audio produced per second of work */
+  speedFactor() {
+    const L = this.log.slice(-8); if (!L.length) return null;
+    const audio = L.reduce((a, x) => a + x.dur, 0), work = L.reduce((a, x) => a + x.ms, 0) / 1000;
+    return { audio, work, factor: audio / work, n: L.length };
+  },
+};
+
+function nextPos(ch, s) {
+  const chapters = R.content.chapters;
+  if (s + 1 < chapters[ch].sents.length) return { ch, s: s + 1 };
+  return ch + 1 < chapters.length ? { ch: ch + 1, s: 0 } : null;
+}
+
+/** Switch back to system voices with an explanation (spec: clear fallback message) */
+function neuralFallback(reason) {
+  S.engine = 'system'; saveSettings(); renderNeuralUI();
+  toast(reason + ' Switched to system voices — you can turn the neural voice back on in Settings.', 7000);
+}
+
+/* =========================================================
+   Voices — grouped by language, quality-sorted, offline/online labels
+   ========================================================= */
+const Voices = {
+  list: [],
+  score(v) {
+    let s = 0;
+    if (/enhanced|premium|natural|neural/i.test(v.name)) s += 4;
+    if (/google/i.test(v.name)) s += 2;
+    if (/compact|espeak/i.test(v.name)) s -= 3;
+    if (v.localService) s += 1; // works offline
+    return s;
+  },
+  load() {
+    if (!synth) return;
+    this.list = synth.getVoices();
+    renderVoicePicker();
+  },
+  current() {
+    if (!this.list.length) return null;
+    return this.list.find(v => v.voiceURI === S.voiceURI) || this.best();
+  },
+  best(lang) {
+    lang = (lang || R.book?.lang || 'en').toLowerCase().split(/[-_]/)[0]; // English by default, whatever the phone's language
+    const match = this.list.filter(v => v.lang.toLowerCase().replace('_', '-').startsWith(lang));
+    const pool = match.length ? match : this.list.filter(v => /^en/i.test(v.lang)).length ? this.list.filter(v => /^en/i.test(v.lang)) : this.list;
+    const region = v => /^en[-_](US|GB)/i.test(v.lang) ? 1 : 0; // mainstream accents first among equals
+    return [...pool].sort((a, b) => this.score(b) - this.score(a) || region(b) - region(a) || (b.default - a.default))[0] || null;
+  },
+};
+
+let langNames; try { langNames = new Intl.DisplayNames(['en'], { type: 'language' }); } catch {}
+let regionNames; try { regionNames = new Intl.DisplayNames(['en'], { type: 'region' }); } catch {}
+/** "en-GB" → "United Kingdom" (accent hint shown next to each voice) */
+const regionLabel = code => { const r = code.split(/[-_]/)[1]; try { return r && regionNames ? regionNames.of(r.toUpperCase()) : code; } catch { return code; } };
+const langLabel = code => { try { return langNames ? langNames.of(code.replace('_', '-')) : code; } catch { return code; } };
+
+function renderVoicePicker() {
+  const sel = $('#voiceSel'), vs = Voices.list;
+  if (!synth) { sel.innerHTML = '<option>Speech not supported in this browser</option>'; sel.disabled = true; return; }
+  if (!vs.length) { sel.innerHTML = '<option>Loading voices…</option>'; return; }
+  const myLang = 'en'; // English voices are listed first
+  const groups = {};
+  vs.forEach(v => { const k = langLabel(v.lang.split(/[-_]/)[0]) || v.lang; (groups[k] ||= []).push(v); });
+  const keys = Object.keys(groups).sort((a, b) => {
+    const am = groups[a][0].lang.toLowerCase().startsWith(myLang), bm = groups[b][0].lang.toLowerCase().startsWith(myLang);
+    return (bm - am) || a.localeCompare(b);
+  });
+  const cur = Voices.current();
+  sel.innerHTML = keys.map(k => `<optgroup label="${esc(k)}">` +
+    groups[k].sort((a, b) => Voices.score(b) - Voices.score(a) || a.name.localeCompare(b.name))
+      .map(v => `<option value="${esc(v.voiceURI)}" ${cur && v.voiceURI === cur.voiceURI ? 'selected' : ''}>${esc(v.name)} — ${esc(regionLabel(v.lang))} · ${v.localService ? 'Offline' : 'Online'}</option>`).join('') +
+    '</optgroup>').join('');
+  $('#voiceCount').textContent = vs.length + ' available';
+  showVoiceInfo();
+}
+function showVoiceInfo() {
+  const v = Voices.current();
+  $('#voiceInfo').innerHTML = v ? `${esc(v.name)}<span class="tag ${v.localService ? 'off' : ''}">${v.localService ? 'Offline' : 'Online · needs internet'}</span>${S.voiceURI ? '' : '<span class="tag">auto</span>'}` : '';
+}
+const SAMPLE = { en: 'This is how I sound. Shall we keep reading?', de: 'So klinge ich. Wollen wir weiterlesen?', fr: 'Voici ma voix. On continue la lecture ?', es: 'Así sueno. ¿Seguimos leyendo?', it: 'Questa è la mia voce. Continuiamo a leggere?', nl: 'Zo klink ik. Zullen we verder lezen?', pt: 'Esta é a minha voz. Vamos continuar a ler?' };
+function preview() {
+  const v = Voices.current(); if (!synth || !v) return;
+  Player.stop(true);
+  const u = new SpeechSynthesisUtterance(SAMPLE[v.lang.slice(0, 2).toLowerCase()] || SAMPLE.en);
+  u.voice = v; u.lang = v.lang; u.rate = S.rate; u.pitch = S.pitch;
+  synth.cancel(); setTimeout(() => synth.speak(u), 60);
+}
+
+/* =========================================================
+   Settings view + appearance
+   ========================================================= */
+function applyAppearance() {
+  const root = document.documentElement;
+  root.dataset.theme = S.theme;
+  root.style.setProperty('--read-font', S.font === 'sans' ? 'var(--sans)' : 'var(--serif)');
+  root.style.setProperty('--read-size', S.size + 'px');
+  root.style.setProperty('--read-lh', S.lh);
+  root.style.setProperty('--read-pad', S.pad + 'px');
+  $('meta[name="theme-color"]').content = getComputedStyle(root).getPropertyValue('--bg').trim() || '#faf9f6';
+  $$('#themeSeg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === S.theme));
+  $$('#fontSeg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === S.font));
+  $('#sizeIn').value = S.size; $('#sizeOut').textContent = S.size + 'px';
+  $('#lhIn').value = S.lh; $('#lhOut').textContent = (+S.lh).toFixed(2);
+  $('#padIn').value = S.pad; $('#padOut').textContent = S.pad + 'px';
+}
+const SPEED_PRESETS = [0.75, 1, 1.25, 1.5, 2];
+/** Speed buttons: −0.1 · 0.75× 1× 1.25× 1.5× 2× · +0.1 (the slider below moves in 0.1 steps) */
+function renderSpeedPresets() {
+  $$('[data-presets]').forEach(box => {
+    box.innerHTML = `<button class="step" data-rate-step="-0.1" aria-label="Slower">−</button>` +
+      SPEED_PRESETS.map(v => `<button data-rate="${v}">${v}×</button>`).join('') +
+      `<button class="step" data-rate-step="0.1" aria-label="Faster">+</button>`;
+  });
+  syncRateUI();
+}
+function setRate(v) {
+  S.rate = Math.round(clamp(v, 0.5, 3) * 100) / 100; saveSettings(); syncRateUI(); liveRestart();
+}
+function syncRateUI() {
+  $$('[data-rate]').forEach(b => b.setAttribute('aria-pressed', Math.abs(+b.dataset.rate - S.rate) < 0.001));
+  for (const sfx of ['', '2']) {
+    $('#rateIn' + sfx).value = S.rate; $('#rateOut' + sfx).textContent = (+S.rate).toFixed(2) + '×';
+    $('#pitchIn' + sfx).value = S.pitch; $('#pitchOut' + sfx).textContent = (+S.pitch).toFixed(2);
+  }
+  $('#rateChip').textContent = String(+(+S.rate).toFixed(2)) + '×';
+}
+// Live effect: changing speed/pitch restarts the current sentence with the new values (debounced)
+let liveTimer;
+function liveRestart() { clearTimeout(liveTimer); liveTimer = setTimeout(() => Player.playing && Player.speakCurrent(), 350); } // neural cache keys include voice + speed, so new audio is made
+
+function bindSettings() {
+  for (const sfx of ['', '2']) {
+    $('#rateIn' + sfx).addEventListener('input', e => setRate(+e.target.value));
+    $('#pitchIn' + sfx).addEventListener('input', e => { S.pitch = +e.target.value; syncRateUI(); saveSettings(); liveRestart(); });
+  }
+  renderSpeedPresets();
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-rate],[data-rate-step]'); if (!b) return;
+    if (b.dataset.rate) setRate(+b.dataset.rate);
+    else setRate(Math.round((S.rate + +b.dataset.rateStep) * 10) / 10);
+  });
+  $('#themeSeg').addEventListener('click', e => { const v = e.target.closest('button')?.dataset.v; if (v) { S.theme = v; saveSettings(); applyAppearance(); } });
+  $('#fontSeg').addEventListener('click', e => { const v = e.target.closest('button')?.dataset.v; if (v) { S.font = v; saveSettings(); applyAppearance(); } });
+  [['sizeIn', 'size'], ['lhIn', 'lh'], ['padIn', 'pad']].forEach(([id, k]) =>
+    $('#' + id).addEventListener('input', e => { S[k] = +e.target.value; saveSettings(); applyAppearance(); }));
+  $('#themeBtn').addEventListener('click', () => {
+    const order = ['light', 'sepia', 'dark']; S.theme = order[(order.indexOf(S.theme) + 1) % 3]; saveSettings(); applyAppearance();
+    toast({ light: 'Light', sepia: 'Sepia', dark: 'Night' }[S.theme] + ' theme', 1200);
+  });
+  $('#voiceSel').addEventListener('change', e => { S.voiceURI = e.target.value; saveSettings(); showVoiceInfo(); liveRestart(); });
+  $('#voiceAutoBtn').addEventListener('click', () => { S.voiceURI = null; saveSettings(); renderVoicePicker(); toast('Using the best voice for each book’s language'); });
+  $('#previewBtn').addEventListener('click', preview);
+}
+
+/* =========================================================
+   Neural voice — Settings UI (download, voice, preview, speed test)
+   ========================================================= */
+function renderNeuralUI() {
+  if (!$('#engineSeg')) return;
+  const neural = S.engine === 'neural', installed = !!S.neuralInstalled;
+  $$('#engineSeg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === S.engine));
+  $('#neuralBox').hidden = !neural;
+  $('#sysVoiceBox').hidden = neural && installed;
+  $('#pitchNote').hidden = !Neural.active;
+  $('#neuralSetup').hidden = installed;
+  $('#neuralReady').hidden = !installed;
+  $('#sizeCpu').textContent = MB(Neural.totalSize('cpu'));
+  $('#sizeFull').textContent = MB(Neural.totalSize('full'));
+  $$('input[name="kvariant"]').forEach(r => r.checked = r.value === (S.kvariant in KOKORO.variants ? S.kvariant : 'full'));
+  const st = { idle: 'Loads when you press play (takes a few seconds).', loading: 'Loading the voice…', ready: 'Loaded and ready.', error: 'Couldn’t start: ' + Neural.error + (Neural.device() === 'webgpu' ? ' — try “Run speed test”, which falls back to the processor if the graphics chip doesn’t work.' : '') }[Neural.status];
+  $('#engineNote').textContent = !neural ? 'Your phone’s built‑in voices. Instant, no download.'
+    : !installed ? 'Not downloaded yet — system voices are used until it is.'
+    : `${KOKORO.variants[S.neuralInstalled].label} neural voice on the ${Neural.engineLabel()} · ${st}`;
+  $('#neuralStatus').textContent = installed ? `Stored on this device: ${MB(Neural.totalSize(S.neuralInstalled))}. Works offline.` +
+    (Neural.mode && Neural.mode !== 'module' && S.neuralInstalled === 'cpu' ? ' Using 1 processor core because the app was opened as a file — open it from its web address to use several cores (much faster).' : '') : '';
+  const sel = $('#kvoiceSel');
+  if (!sel.options.length) sel.innerHTML = ['US', 'UK'].map(r => `<optgroup label="English (${r === 'US' ? 'United States' : 'United Kingdom'})">` +
+    KVOICES.filter(v => v[2] === r).map(([id, name, , sex, q]) => `<option value="${id}">${name} — ${sex} · ${q}${KOKORO.preload.includes(id) ? '' : ' (0.5 MB download)'}</option>`).join('') + '</optgroup>').join('');
+  sel.value = S.kvoice;
+  if (S.bench && S.bench.variant === S.neuralInstalled && S.bench.results) $('#benchOut').innerHTML = benchHtml(S.bench);
+}
+
+/** Speed test result, with the calculation for each chip tried */
+function benchHtml(b) {
+  const lines = b.results.map(r => {
+    const name = r.device === 'webgpu' ? 'Graphics chip' : `Processor (${r.threads} core${r.threads > 1 ? 's' : ''})`;
+    if (r.error) return `<b>${name}:</b> didn’t work (${esc(r.error.split(/Error: /).pop().split(/[.\n]/)[0].slice(0, 70))}).`;
+    const f = r.dur / r.work;
+    return `<b>${name}:</b> ${r.dur.toFixed(2)} s of speech in ${r.work.toFixed(2)} s → ${r.dur.toFixed(2)} ÷ ${r.work.toFixed(2)} = <b>${f.toFixed(2)}×</b> real time`;
+  });
+  const best = b.results.find(r => r.device === b.best && !r.error);
+  if (!best) return lines.join('<br>') + '<br><span class="bad">✗ The neural voice couldn’t run on this phone.</span>';
+  const f = best.dur / best.work;
+  const verdict = f >= 1.5 ? '<span class="ok">✓ Fast enough</span> to read without gaps.'
+    : f >= 1 ? '<span class="ok">✓ Just fast enough</span> — the 5‑sentence head start covers the odd slow sentence.'
+    : `<span class="bad">✗ Too slow</span> — it would be waiting about ${Math.round((1 - f) * 100)}% of the time (1 − ${f.toFixed(2)}), so the app switches to system voices if it falls behind.` +
+      (Neural.threads() === 1 && !/^https?:$/.test(location.protocol) ? ' Opening the app from its web address lets it use several cores.' : '');
+  return lines.join('<br>') + `<br>Needs ≥ 1× to keep up. Using the <b>${best.device === 'webgpu' ? 'graphics chip' : 'processor'}</b>.<br>${verdict}`;
+}
+
+/** Measure each chip the installed model can use; keep the faster one. */
+async function runBenchmark() {
+  const out = $('#benchOut'), btn = $('#kBenchBtn');
+  btn.disabled = true; Player.stop(true);
+  const v = KOKORO.variants[S.neuralInstalled];
+  const devices = v.devices.filter(d => d !== 'webgpu' || Neural.gpuOk);
+  const results = [];
+  for (const device of devices) {
+    const name = device === 'webgpu' ? 'graphics chip' : 'processor';
+    try {
+      Neural.shutdown(); S.neuralDevice = device;
+      out.textContent = `Loading the voice on the ${name}…`; await Neural.start(); await Neural.ensureVoice(S.kvoice);
+      out.textContent = `Warming up the ${name}…`; await Neural.synth('Hello there.', S.kvoice, 1).promise;
+      out.textContent = `Measuring the ${name}…`;
+      const r = await Neural.synth('The quick brown fox jumps over the lazy dog, then settles down by the fire to read a good book.', S.kvoice, 1).promise;
+      // Some phone graphics drivers return silence or noise instead of failing — check the audio
+      const d = r.buffer.getChannelData(0); let ss = 0; for (let i = 0; i < d.length; i += 5) ss += d[i] * d[i];
+      const rms = Math.sqrt(ss / (d.length / 5));
+      if (!(rms > 0.005 && rms < 0.5) || r.dur < 2 || r.dur > 20) throw new Error('it produced unusable audio');
+      results.push({ device, dur: r.dur, work: r.ms / 1000, threads: Neural.threads() });
+    } catch (e) { results.push({ device, error: e.message || String(e), threads: Neural.threads() }); }
+  }
+  const ok = results.filter(r => !r.error).sort((a, b) => b.dur / b.work - a.dur / a.work);
+  S.neuralDevice = ok[0]?.device || 'wasm';
+  S.bench = { variant: S.neuralInstalled, results, best: ok[0]?.device || null, at: Date.now() }; saveSettings();
+  Neural.shutdown(); // reloads on the chosen chip at next play
+  out.innerHTML = benchHtml(S.bench); renderNeuralUI();
+  btn.disabled = false;
+}
+
+async function previewNeural() {
+  const btn = $('#kPreviewBtn'), ctx = Neural.audio();
+  Player.stop(true); btn.disabled = true; const label = btn.textContent; btn.textContent = 'Preparing…';
+  try {
+    await Neural.start(); await Neural.ensureVoice(S.kvoice);
+    const name = KVOICES.find(v => v[0] === S.kvoice)?.[1] || 'your voice';
+    const r = await Neural.synth(`Hi, I'm ${name}. This is how I'll sound reading your books.`).promise;
+    const src = ctx.createBufferSource(); src.buffer = r.buffer; src.connect(ctx.destination); src.start();
+  } catch (e) { toast('Preview failed: ' + e.message, 5000); }
+  btn.disabled = false; btn.textContent = label;
+}
+
+let dlAbort = null;
+async function startDownload() {
+  const variant = $('input[name="kvariant"]:checked')?.value || 'full';
+  S.kvariant = variant; saveSettings();
+  if (!navigator.onLine) { toast('You’re offline — connect (ideally to Wi‑Fi) to download the voice.'); return; }
+  dlAbort = new AbortController();
+  $('#dlProg').hidden = false; $('#dlBtn').disabled = true; $('#dlCancel').hidden = false;
+  try {
+    await Neural.download(variant, (done, total, url) => {
+      const pct = Math.floor((done / total) * 100);
+      $('#dlBarFill').style.width = pct + '%'; $('#dlPct').textContent = pct + '%';
+      $('#dlText').textContent = `${MB(done)} of ${MB(total)} · ${decodeURIComponent(url.split('/').pop())}`;
+    }, dlAbort.signal);
+    S.neuralInstalled = variant; S.engine = 'neural'; saveSettings();
+    $('#dlProg').hidden = true; renderNeuralUI();
+    toast('Neural voice downloaded — running a quick speed test…');
+    runBenchmark();
+  } catch (e) {
+    toast(e.name === 'AbortError' ? 'Download paused — finished files are kept, so it continues where it stopped.'
+      : 'Download failed: ' + e.message + '. Finished files are kept; try again on a stable connection.', 6000);
+  } finally { $('#dlBtn').disabled = false; $('#dlCancel').hidden = true; dlAbort = null; }
+}
+
+function bindNeural() {
+  $('#engineSeg').addEventListener('click', e => {
+    const v = e.target.closest('button')?.dataset.v; if (!v || v === S.engine) return;
+    S.engine = v; saveSettings(); renderNeuralUI();
+    if (Neural.active) Neural.start().catch(() => {});
+    liveRestart();
+  });
+  $('#dlBtn').addEventListener('click', startDownload);
+  $('#dlCancel').addEventListener('click', () => dlAbort?.abort());
+  $$('input[name="kvariant"]').forEach(r => r.addEventListener('change', () => { S.kvariant = r.value; saveSettings(); }));
+  // Is there a usable WebGPU adapter? (navigator.gpu can exist without one)
+  (async () => { try { Neural.gpuOk = !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch { Neural.gpuOk = false; } renderNeuralUI(); })();
+  $('#kvoiceSel').addEventListener('change', e => {
+    S.kvoice = e.target.value; saveSettings();
+    Neural.ensureVoice(S.kvoice).then(liveRestart, () => toast('This voice needs a one‑time 0.5 MB download — connect to the internet and try again.', 5000));
+  });
+  $('#kPreviewBtn').addEventListener('click', previewNeural);
+  $('#kBenchBtn').addEventListener('click', runBenchmark);
+  $('#kDeleteBtn').addEventListener('click', async () => {
+    if (!confirm('Delete the neural voice files from this device? You can download them again later.')) return;
+    Player.stop(); await Neural.remove();
+    S.neuralInstalled = null; S.neuralDevice = null; S.engine = 'system'; S.bench = null; saveSettings();
+    $('#benchOut').textContent = 'Speed test not run yet.'; renderNeuralUI(); toast('Neural voice deleted');
+  });
+  navigator.storage?.estimate?.().then(e => { if (e && e.quota) $('#spaceNote').textContent = `Space available to this app: about ${(Math.max(0, e.quota - e.usage) / 1073741824).toFixed(1)} GB. Wi‑Fi recommended.`; }).catch(() => {});
+}
+
+/* =========================================================
+   Help content + first-run welcome
+   ========================================================= */
+const HELP = [
+  ['Import a book', `<ol><li>Open the <b>Library</b> tab and tap <b>Import a book</b>.</li><li>Pick an <b>.epub</b> file (from Downloads, Drive, etc.). It’s copied into the app, so you can delete the original.</li><li>It opens straight away in the Reader.</li></ol>
+   <p><b>PDFs</b> <span class="soon">Stage 2</span> — text PDFs will be supported with header/footer cleanup. A <i>scanned</i> PDF is just pictures of pages with no text layer; it would need OCR, which this app doesn’t do. Run it through an OCR tool first, or find an EPUB edition.</p>
+   <p><b>DRM-protected EPUBs</b> (most store purchases) can’t be opened — the text is encrypted.</p>`],
+  ['How resume works', `<p>Your position is saved as <i>chapter + sentence</i> every time a sentence changes, when you pause, and when you leave the app. Reopen the book (Library › <b>Continue</b>) and it starts from that exact sentence. Each book remembers its own place.</p><p>Tap any sentence in the Reader to jump there.</p>`],
+  ['Choose and improve voices', `<p>Settings › <b>Voice</b> lists every voice your device offers. English voices come first (with their accent, e.g. United Kingdom), best-sounding at the top; books in other languages automatically use a matching voice if you have one. <b>Offline</b> voices run on your phone; <b>Online</b> voices need internet. Use <b>Preview</b> to hear one.</p>
+   <p><b>Get better voices on Android:</b> Android Settings › System › Languages › Text-to-speech output › (Google) › <b>Install voice data</b> › <b>English (United States)</b> or <b>English (United Kingdom)</b>, then download a high-quality voice. Reopen this app and pick it.</p>
+   <p><b>On a Samsung Galaxy (e.g. S24):</b> Settings › General management › <b>Text-to-speech</b>. Set <i>Preferred engine</i> to <b>Speech Services by Google</b>, tap the ⚙ next to it › <b>Install voice data</b> › <b>English</b> and download the voice you like. Fully close Chrome (swipe it away) and reopen the app so the new voices appear.</p>
+   <p><b>Neural voice (beta):</b> Settings › Voice engine › <b>Neural</b>. A much more natural AI voice that runs on your phone. It needs a one‑time download (about 350 MB for <b>Best</b>, or 117 MB for <b>Smaller</b> — use Wi‑Fi), then works offline. After downloading, a speed test tries your phone’s graphics chip and processor, shows the numbers, and uses the faster one. If it still can’t make speech as fast as it’s read aloud, the app switches back to system voices and tells you. Open the app from its web address: from a downloaded file it can only use one processor core.</p>
+   <p>Speed (0.5–3×) changes the current sentence immediately. Pitch only works with system voices.</p>`],
+  ['Add to your home screen', `<p>Open the app from its web address, then tap <b>Install</b> at the top (or Chrome’s ⋮ menu › <b>Install app</b>). It then opens full-screen like a normal app and works offline.</p>
+   <p>Always open it from the web address or the home-screen icon, not from a downloaded file — a downloaded file can’t keep your library or reading position.</p>`],
+  ['Lock screen and headphones', `<p>While it’s reading, play/pause and next/previous sentence appear on the lock screen and in the notification shade, with the book and chapter. Headphone buttons work too: <b>press once</b> to play/pause, <b>twice</b> for the next sentence, <b>three times</b> for the previous one (exact presses depend on your headphones). Unplugging or disconnecting headphones pauses reading.</p>`],
+  ['Keep reading with the screen off', `<p>Chrome on Android may still stop speech when the screen locks or you switch apps — this is best effort. If it stops, it continues from the current sentence when you come back. Tip: Android Settings › Apps › Chrome › Battery › <b>Unrestricted</b> helps a lot. On Samsung, also add Chrome under Settings › Battery › Background usage limits › <b>Never sleeping apps</b>.</p>`],
+  ['Speed and chapters', `<p>Tap the speed button (e.g. <b>1×</b>) on the player for quick picks — 0.75×, 1×, 1.25×, 1.5×, 2× — or − / + to change by 0.1. The ⏮ / ⏭ buttons jump to the previous / next chapter (⏮ first goes back to the start of the current chapter); ≪ / ≫ move one sentence.</p>`],
+  ['Sleep timer, bookmarks, pronunciation, skip rules', `<p><span class="soon">Stages 2–3</span> Sleep timer (15–60 min or end of chapter), bookmarks with notes, a find/replace list for names the voice mispronounces, and toggles to skip footnotes, page numbers, headings or bracketed text.</p>`],
+  ['Back up and restore', `<p><span class="soon">Stage 2</span> Export settings, bookmarks and pronunciation fixes as a JSON file, and import them on another device.</p>`],
+  ['Privacy', `<p>Nothing leaves your device. There’s no account and no server: books, positions and settings live in this browser’s storage. (Voices labelled “Online” are run by your browser’s voice provider, which receives the sentence being spoken — use an Offline voice to avoid that.) Clearing the browser’s site data deletes your library.</p>`],
+];
+function renderHelp() {
+  $('#helpBody').innerHTML = `<p class="muted" style="margin:4px 4px 14px;line-height:1.5">Short answers to the things people ask most. Tap a topic to open it.</p>` +
+    HELP.map(([t, b], i) => `<details${i === 0 ? ' open' : ''}><summary>${t}</summary><div class="body">${b}</div></details>`).join('');
+}
+
+/* =========================================================
+   Navigation (tabs + sheets)
+   ========================================================= */
+let currentTab = 'library';
+function showTab(name) {
+  currentTab = name;
+  $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
+  $$('nav.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === name));
+  $('#player').classList.toggle('show', name === 'reader' && !!R.book);
+  $('#chaptersBtn').hidden = !(name === 'reader' && R.book);
+  $('#topTitle').textContent = name === 'reader' ? (R.book ? R.content.chapters[R.ch].title : 'Reader') : { library: 'Library', settings: 'Settings', help: 'Help' }[name];
+  if (name === 'library') renderLibrary();
+  if (name === 'reader' && R.book) requestAnimationFrame(() => highlight(true));
+}
+function openSheet(id) { $('#scrim').classList.add('open'); $('#' + id).classList.add('open'); }
+function closeSheets() { $('#scrim').classList.remove('open'); $$('.sheet.open').forEach(s => s.classList.remove('open')); }
+function openChapters() {
+  $('#chapList').innerHTML = R.content.chapters.map((c, i) =>
+    `<button class="row-btn ${i === R.ch ? 'cur' : ''}" data-ch="${i}"><span class="n">${i + 1}</span><span>${esc(c.title)}</span></button>`).join('');
+  openSheet('chapSheet');
+  $('#chapList .cur')?.scrollIntoView({ block: 'center' });
+}
+
+/* =========================================================
+   Hosting: service worker (offline + multi-core) and install
+   Only when served from a web address; opening the file directly skips this.
+   ========================================================= */
+function setupHosting() {
+  if (!/^https?:$/.test(location.protocol) || !('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').then(() => {
+    // The service worker adds the "isolation" headers, which only apply to pages it served.
+    // On the very first visit, reload once so the page comes through it.
+    if (self.crossOriginIsolated) { sessionStorage.removeItem('ra.coiReload'); return; }
+    const reloadOnce = () => { if (!sessionStorage.getItem('ra.coiReload')) { sessionStorage.setItem('ra.coiReload', '1'); location.reload(); } };
+    if (navigator.serviceWorker.controller) reloadOnce();
+    else navigator.serviceWorker.addEventListener('controllerchange', reloadOnce, { once: true });
+  }).catch(e => console.warn('Service worker not registered', e));
+
+  let deferred = null;
+  addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; $('#installBtn').hidden = false; });
+  addEventListener('appinstalled', () => { $('#installBtn').hidden = true; toast('Installed — open Read Aloud from your home screen'); });
+  $('#installBtn').addEventListener('click', async () => {
+    if (!deferred) return;
+    deferred.prompt(); await deferred.userChoice.catch(() => {}); deferred = null; $('#installBtn').hidden = true;
+  });
+  navigator.storage?.persist?.().catch(() => {}); // ask Chrome to keep the library even when space is low
+}
+
+/* =========================================================
+   Boot
+   ========================================================= */
+async function boot() {
+  setupHosting();
+  // Theme: follow the system on first run, then remember the choice
+  if (!S.theme) { S.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; saveSettings(); }
+  applyAppearance(); syncRateUI(); setPlayIcon(); renderHelp(); bindSettings(); bindNeural();
+
+  const persistent = await DB.init();
+  const warn = [];
+  if (!persistent) warn.push('<b>Storage is blocked</b> in this browser (common for files opened from disk in some browsers, or private mode). Books will work but won’t be kept after you close the tab. Open the app from its web address instead.');
+  if (!synth) warn.push('<b>Speech isn’t available</b> in this browser, so books can be read but not read aloud. Use Chrome or Edge.');
+  banner(warn.join('<br><br>'));
+
+  if (synth) { Voices.load(); synth.addEventListener?.('voiceschanged', () => Voices.load()); setTimeout(() => Voices.load(), 800); }
+
+  renderNeuralUI();
+  if (!LS.get('ra.welcomed', false)) $('#welcome').hidden = false;
+  await renderLibrary();
+
+  // --- Events ---
+  $$('nav.tabs button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-goto],[data-open],[data-del],[data-close],[data-ch]');
+    if (!t) return;
+    if (t.dataset.goto) showTab(t.dataset.goto);
+    else if (t.dataset.open) openBook(t.dataset.open);
+    else if (t.dataset.close !== undefined) closeSheets();
+    else if (t.dataset.ch) { closeSheets(); goTo(+t.dataset.ch, 0); }
+    else if (t.dataset.del) deleteBook(t.dataset.del);
+  });
+  $('#welcomeDismiss').addEventListener('click', () => { $('#welcome').hidden = true; LS.set('ra.welcomed', true); });
+  $('[data-goto="help"]', $('#welcome')).addEventListener('click', () => LS.set('ra.welcomed', true));
+  $('#scrim').addEventListener('click', closeSheets);
+  $('#chaptersBtn').addEventListener('click', openChapters);
+  $('#rateChip').addEventListener('click', () => openSheet('rateSheet'));
+
+  $('#fileInput').addEventListener('change', e => { handleFile(e.target.files[0]); e.target.value = ''; });
+  const zone = $('#importZone');
+  ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.remove('drag'); }));
+  zone.addEventListener('drop', e => handleFile(e.dataTransfer.files[0]));
+
+  // Player controls
+  $('#playBtn').addEventListener('click', () => Player.toggle());
+  $('#nextBtn').addEventListener('click', () => step(+1));
+  $('#prevBtn').addEventListener('click', () => step(-1));
+  $('#prevChBtn').addEventListener('click', () => goTo(R.s > 3 ? R.ch : Math.max(0, R.ch - 1), 0)); // restart chapter, or previous if at its start
+  $('#nextChBtn').addEventListener('click', () => {
+    if (R.ch < R.content.chapters.length - 1) goTo(R.ch + 1, 0); else toast('This is the last chapter');
+  });
+  Media.init();
+
+  // Tap a sentence → jump there (keeps playing if playing)
+  $('#readerText').addEventListener('click', e => { const s = e.target.closest('.s'); if (s) { R.userScrollAt = 0; goTo(R.ch, +s.dataset.i); } });
+  // Manual scrolling pauses auto-scroll for a few seconds
+  ['wheel', 'touchmove'].forEach(ev => $('#view-reader').addEventListener(ev, () => { R.userScrollAt = Date.now(); }, { passive: true }));
+
+  // Save on leave
+  addEventListener('pagehide', savePosition);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { savePosition(); return; }
+    // Back on screen: if Chrome silently stopped the speech while we were away, carry on from this sentence
+    if (Player.playing && Date.now() - (Player.lastStart || 0) > 20000 && !(synth && synth.speaking) && !Player.src && !$('#playBtn').classList.contains('buffering')) {
+      toast('Speech was interrupted — continuing from this sentence'); Player.speakCurrent();
+    }
+  });
+}
+
+async function deleteBook(id) {
+  const b = await DB.get('books', id);
+  if (!b || !confirm(`Delete “${b.title}” and its reading position from this device?`)) return;
+  if (R.book?.id === id) { Player.stop(); R.book = R.content = null; $('#readerText').innerHTML = ''; $('#readerEmpty').hidden = false; }
+  await Promise.all([DB.del('books', id), DB.del('content', id), DB.del('progress', id)]);
+  if (S.lastBookId === id) { S.lastBookId = null; saveSettings(); }
+  renderLibrary(); toast('Deleted');
+}
+
+boot();
+</script>
+</body>
+</html>

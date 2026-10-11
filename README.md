@@ -20,3 +20,12 @@ A read-aloud ebook reader that runs entirely in the browser. Built for Android C
 
 ## Credits
 Kokoro-82M (Apache-2.0) · kokoro-js and Transformers.js (Apache-2.0) · ONNX Runtime Web (MIT) · JSZip (MIT).
+
+## Building from source
+Everything needed to rebuild the app is in `source/`:
+```
+cd source
+npm install
+python3 build.py
+```
+`app.html` is the readable source (all app code, commented); the build inlines the libraries into `index.html`. Tests (headless Chrome via Playwright) are in `source/test/`.
